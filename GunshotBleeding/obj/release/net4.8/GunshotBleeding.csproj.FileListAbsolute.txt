@@ -1,0 +1,6 @@
+/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/release/net4.8/GunshotBleeding.csproj.AssemblyReference.cache
+/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/release/net4.8/GunshotBleeding.GeneratedMSBuildEditorConfig.editorconfig
+/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/release/net4.8/GunshotBleeding.AssemblyInfoInputs.cache
+/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/release/net4.8/GunshotBleeding.AssemblyInfo.cs
+/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/release/net4.8/GunshotBleeding.csproj.CoreCompileInputs.cache
+/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/release/net4.8/GunshotBleeding.sourcelink.json
