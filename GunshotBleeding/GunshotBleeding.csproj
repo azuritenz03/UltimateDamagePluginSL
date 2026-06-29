@@ -3,6 +3,7 @@
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
     <OutputType>Library</OutputType>
+    <AssemblyName>BleedingRealism</AssemblyName>
   </PropertyGroup>
 
   <ItemGroup>
