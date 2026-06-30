@@ -71,7 +71,7 @@ namespace UltimateDamagePlugin
                     {
                         // Centralized handling: use descriptive damageType from profile.SourceName when available
                         var damageType = string.IsNullOrEmpty(profile.SourceName) ? "Environmental" : profile.SourceName;
-                        ProcessDamage(ev.Player, ev.Amount, damageType, cfg.DefaultCaliber, ev.Attacker, null, profile.Duration, profile.DamagePerSecond, profile.TickIntervalSeconds, profile.SourceName);
+                        ProcessDamage(ev.Player, ev.Amount, damageType, cfg.DefaultCaliber, ev.Attacker, null, profile.Duration, profile.DamagePerSecond, profile.TickIntervalSeconds, profile.SourceName, false);
                     }
                 }
 
@@ -102,7 +102,7 @@ namespace UltimateDamagePlugin
             else
                 return;
 
-            ProcessDamage(ev.Player, ev.Amount, "Gunshot", cfg.DefaultCaliber, ev.Attacker, null, duration, cfg.BleedDamagePerSecond, cfg.BleedTickIntervalSeconds, "gunshot");
+            ProcessDamage(ev.Player, ev.Amount, "Gunshot", cfg.DefaultCaliber, ev.Attacker, null, duration, cfg.BleedDamagePerSecond, cfg.BleedTickIntervalSeconds, "gunshot", false);
 
             if (cfg.Debug || cfg.DebugMode)
                 Log.Info($"[GunshotBleeding] {ev.Player.Nickname} took {ev.Amount} damage from {ev.Attacker.Nickname} → bleed {duration}s");
@@ -249,16 +249,23 @@ namespace UltimateDamagePlugin
             }
 
             damage = Math.Max(1f, damage);
-            // Prevent the engine from also applying default shot damage.
-            ev.CanHurt = false;
-            skipNextHurting.TryAdd(key, 0);
+            // Let the engine apply the actual shot damage. OnHurting will be triggered and handle bleed/durability.
+            // Avoid calling Hurt manually here to prevent native crashes; do only non-damaging effects.
             try
             {
-                ProcessDamage(victim, damage, "Gunshot", cfg.DefaultCaliber, ev.Player, hitboxType.ToString(), (bleed && bloodTimer > 0) ? bloodTimer : 0, cfg.BleedDamagePerSecond, cfg.BleedTickIntervalSeconds, "gunshot");
+                if (bleed && bloodTimer > 0)
+                {
+                    // Apply visual and feedback effects only; do not change health here.
+                    ApplyBleedEffect(victim, bloodTimer, cfg.BleedDamagePerSecond, cfg.BleedTickIntervalSeconds, hitboxType.ToString());
+                    ApplyInjuryState(victim, new BleedProfile { Duration = bloodTimer, DamagePerSecond = cfg.BleedDamagePerSecond, TickIntervalSeconds = cfg.BleedTickIntervalSeconds, Severity = bloodTimer >= cfg.HeavyBleedDuration ? "severe" : bloodTimer >= cfg.MediumBleedDuration ? "moderate" : "light", SourceName = "gunshot" });
+                    PlayBleedFeedback(victim, "gunshot");
+                    try { TriggerBleedVisuals(victim, cfg.BleedDamagePerSecond); } catch { }
+                }
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore processing failures to avoid server crashes on lag.
+                if (cfg.Debug || cfg.DebugMode)
+                    Log.Warn($"[GunshotBleeding] OnShot visual/bleed handling failed: {ex.Message}");
             }
 
             if (cfg.Debug || cfg.DebugMode)
@@ -772,7 +779,7 @@ namespace UltimateDamagePlugin
             catch { }
         }
 
-        private void ProcessDamage(Player victim, float damage, string damageType, string caliber, Player attacker, string bodyPart, int bleedDuration, float bleedDamagePerSecond, float bleedTickIntervalSeconds, string sourceName)
+        private void ProcessDamage(Player victim, float damage, string damageType, string caliber, Player attacker, string bodyPart, int bleedDuration, float bleedDamagePerSecond, float bleedTickIntervalSeconds, string sourceName, bool applyHurt = true)
         {
             if (isDisposed)
                 return;
@@ -857,6 +864,7 @@ namespace UltimateDamagePlugin
                 catch { }
 
                 // Apply damage via game API (use reflection to tolerate multiple EXILED signatures)
+                if (applyHurt)
                 try
                 {
                     var hurtCalled = false;
