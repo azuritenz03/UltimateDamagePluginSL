@@ -17,7 +17,6 @@ namespace UltimateDamagePlugin
             Exiled.Events.Handlers.Player.Shot += handler.OnShot;
             Exiled.Events.Handlers.Player.Died += handler.OnDied;
             Exiled.Events.Handlers.Player.UsedItem += handler.OnUsedItem;
-            Exiled.Events.Handlers.Scp914.UpgradingPlayer += handler.OnUpgradingPlayer;
             base.OnEnabled();
         }
 
@@ -27,7 +26,6 @@ namespace UltimateDamagePlugin
             Exiled.Events.Handlers.Player.Shot -= handler.OnShot;
             Exiled.Events.Handlers.Player.Died -= handler.OnDied;
             Exiled.Events.Handlers.Player.UsedItem -= handler.OnUsedItem;
-            Exiled.Events.Handlers.Scp914.UpgradingPlayer -= handler.OnUpgradingPlayer;
             try
             {
                 handler?.Dispose();
@@ -50,9 +48,6 @@ namespace UltimateDamagePlugin
                 cfg.BleedTickIntervalSeconds = 1f;
                 changed = true;
             }
-
-            if (cfg.BleedChance < 0f) { cfg.BleedChance = 0f; changed = true; }
-            if (cfg.BleedChance > 100f) { cfg.BleedChance = 100f; changed = true; }
 
             if (cfg.HudMaxLineLength < 20) { cfg.HudMaxLineLength = 20; changed = true; }
             if (cfg.HudMaxLineLength > 240) { cfg.HudMaxLineLength = 240; changed = true; }

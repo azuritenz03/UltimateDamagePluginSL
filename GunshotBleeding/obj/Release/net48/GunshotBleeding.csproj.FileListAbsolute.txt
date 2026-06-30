@@ -16,3 +16,5 @@
 /workspaces/BleedingPlugin-SCPSL/GunshotBleeding/bin/Release/net48/UltimateDamagePlugin.pdb
 /workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/Release/net48/UltimateDamagePlugin.dll
 /workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/Release/net48/UltimateDamagePlugin.pdb
+/workspaces/BleedingPlugin-SCPSL/FinalRelease/UltimateDamagePlugin.dll
+/workspaces/BleedingPlugin-SCPSL/FinalRelease/UltimateDamagePlugin.pdb
