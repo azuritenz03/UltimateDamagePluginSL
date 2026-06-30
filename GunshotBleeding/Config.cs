@@ -1,6 +1,6 @@
 using Exiled.API.Interfaces;
 
-namespace GunshotBleeding
+namespace UltimateDamagePlugin
 {
     public class Config : IConfig
     {
@@ -25,6 +25,14 @@ namespace GunshotBleeding
         public float ArmorDamageReduction { get; set; } = 0.2f;
         public float ArmorBleedChanceModifier { get; set; } = 0.65f;
         public float ArmorBleedDurationModifier { get; set; } = 0.8f;
+        // New armor durability and caliber behavior
+        public float ArmorDurability { get; set; } = 100f;
+        public float ArmorDurabilityLossPerHit { get; set; } = 12f;
+        public float ArmorPenetrationDurabilityLossMultiplier { get; set; } = 2f;
+        // Calibers that are generally resisted by armor (case-insensitive match)
+        public string[] ArmorResistantCalibers { get; set; } = new[] { "9x19mm", "5.56mm" };
+        // Calibers that often penetrate armor
+        public string[] ArmorPenetratingCalibers { get; set; } = new[] { "7.62x39", "7.62x51", "12g" };
 
         public float RangeDamageFalloffStart { get; set; } = 12f;
         public float RangeDamageFalloffEnd { get; set; } = 40f;
@@ -53,5 +61,27 @@ namespace GunshotBleeding
         public float FallInjuryChance { get; set; } = 0.35f;
         public float HazardInjuryChance { get; set; } = 0.25f;
         public float HazardInjuryDamageMultiplier { get; set; } = 1.2f;
+        // Default caliber string used in death/hurt messages when specific ammo is unavailable.
+        public string DefaultCaliber { get; set; } = "9x19mm";
+        // Use the game's built-in bleeding effect (may apply default large ticks). Disable to use plugin ticks only.
+        public bool UseBuiltInBleedingEffect { get; set; } = false;
+
+        // Ragdoll physics tuning
+        public float RagdollMassMultiplier { get; set; } = 3f;
+        public float RagdollDrag { get; set; } = 2f;
+        public float RagdollAngularDrag { get; set; } = 0.9f;
+        public float RagdollFreezeDuration { get; set; } = 0.35f;
+
+        // HUD / Indicator options
+        public bool EnableArmorHud { get; set; } = true;
+        public string ArmorHudPosition { get; set; } = "TopRight"; // TopLeft/TopRight/BottomLeft/BottomRight
+        public string ArmorHudColor { get; set; } = "#00BFFF";
+        public bool EnableBleedHud { get; set; } = true;
+        public string BleedHudPosition { get; set; } = "TopLeft";
+        public string BleedHudColor { get; set; } = "#FF4500";
+        // Maximum characters per HUD line to avoid overlapping other plugins
+        public int HudMaxLineLength { get; set; } = 80;
+        // Debug mode for verbose diagnostic logging and optional per-player overlay
+        public bool DebugMode { get; set; } = false;
     }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -10,15 +11,17 @@ using InventorySystem.Items;
 using InventorySystem;
 using InventorySystem.Items.Armor;
 
-namespace GunshotBleeding
+namespace UltimateDamagePlugin
 {
     public class EventHandler
     {
         private readonly Random random = new Random();
-        private readonly Dictionary<string, ChestHitState> chestHitHistory = new Dictionary<string, ChestHitState>();
-        private readonly Dictionary<string, BleedTickState> activeBleeds = new Dictionary<string, BleedTickState>();
-        private readonly Dictionary<string, InjuryState> injuryStates = new Dictionary<string, InjuryState>();
-        private readonly HashSet<string> skipNextHurting = new HashSet<string>();
+        private readonly ConcurrentDictionary<string, ChestHitState> chestHitHistory = new ConcurrentDictionary<string, ChestHitState>();
+        private readonly ConcurrentDictionary<string, BleedTickState> activeBleeds = new ConcurrentDictionary<string, BleedTickState>();
+        private readonly ConcurrentDictionary<string, InjuryState> injuryStates = new ConcurrentDictionary<string, InjuryState>();
+        private readonly ConcurrentDictionary<string, byte> skipNextHurting = new ConcurrentDictionary<string, byte>();
+        private readonly ConcurrentDictionary<string, float> armorDurability = new ConcurrentDictionary<string, float>();
+        private volatile bool isDisposed = false;
 
         private class ChestHitState
         {
@@ -31,6 +34,7 @@ namespace GunshotBleeding
             public float DamagePerSecond;
             public int RemainingTicks;
             public float TickIntervalSeconds;
+            public System.Collections.Generic.HashSet<string> AffectedParts = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
         }
 
         private class BleedProfile
@@ -65,19 +69,17 @@ namespace GunshotBleeding
                     var profile = CreateNonHumanBleedProfile(ev.Attacker, ev.Amount, cfg);
                     if (profile != null && profile.Duration > 0)
                     {
-                        ev.Player.EnableEffect(EffectType.Bleeding, profile.Duration);
-                        ApplyBleedEffect(ev.Player, profile.Duration, profile.DamagePerSecond, profile.TickIntervalSeconds);
-                        ApplyInjuryState(ev.Player, profile);
-                        PlayBleedFeedback(ev.Player, profile.SourceName);
+                        // Centralized handling: ProcessDamage will apply Hurt, bleed and HUD updates
+                        ProcessDamage(ev.Player, ev.Amount, "Environmental", cfg.DefaultCaliber, ev.Attacker, null, profile.Duration, profile.DamagePerSecond, profile.TickIntervalSeconds, profile.SourceName);
                     }
                 }
 
                 return;
             }
 
-            if (!string.IsNullOrEmpty(key) && skipNextHurting.Contains(key))
+            if (!string.IsNullOrEmpty(key) && skipNextHurting.ContainsKey(key))
             {
-                skipNextHurting.Remove(key);
+                skipNextHurting.TryRemove(key, out _);
                 return;
             }
 
@@ -99,12 +101,9 @@ namespace GunshotBleeding
             else
                 return;
 
-            ev.Player.EnableEffect(EffectType.Bleeding, duration);
-            ApplyBleedEffect(ev.Player, duration, cfg.BleedDamagePerSecond, cfg.BleedTickIntervalSeconds);
-            ApplyInjuryState(ev.Player, new BleedProfile { Duration = duration, DamagePerSecond = cfg.BleedDamagePerSecond, TickIntervalSeconds = cfg.BleedTickIntervalSeconds, Severity = duration >= cfg.HeavyBleedDuration ? "severe" : duration >= cfg.MediumBleedDuration ? "moderate" : "light", SourceName = "gunshot" });
-            PlayBleedFeedback(ev.Player, "gunshot");
+            ProcessDamage(ev.Player, ev.Amount, "Gunshot", cfg.DefaultCaliber, ev.Attacker, null, duration, cfg.BleedDamagePerSecond, cfg.BleedTickIntervalSeconds, "gunshot");
 
-            if (cfg.Debug)
+            if (cfg.Debug || cfg.DebugMode)
                 Log.Info($"[GunshotBleeding] {ev.Player.Nickname} took {ev.Amount} damage from {ev.Attacker.Nickname} → bleed {duration}s");
         }
 
@@ -136,14 +135,14 @@ namespace GunshotBleeding
             if (hitboxType == HitboxType.Headshot)
             {
                 ev.CanHurt = false;
-                skipNextHurting.Add(key);
+                skipNextHurting.TryAdd(key, 0);
 
-                victim.Kill(DamageType.Firearm, "Headshot");
+                DoKill(victim, DamageType.Firearm, "Headshot", cfg.DefaultCaliber);
 
                 if (cfg.Debug)
                     Log.Info($"[GunshotBleeding] {ev.Player.Nickname} scored headshot on {victim.Nickname}");
 
-                chestHitHistory.Remove(key);
+                chestHitHistory.TryRemove(key, out _);
                 return;
             }
 
@@ -163,7 +162,15 @@ namespace GunshotBleeding
             try
             {
                 if (victim != null && victim.Inventory != null)
-                    hasArmor = BodyArmorUtils.TryGetBodyArmor(victim.Inventory, out var _);
+                    hasArmor = BodyArmorUtils.TryGetBodyArmor(victim.Inventory, out var armorItem);
+                    if (hasArmor)
+                    {
+                        var prior = armorDurability.GetOrAdd(key, k => Plugin.Instance.Config.ArmorDurability);
+                        if (prior <= 0f)
+                        {
+                            hasArmor = false; // previously broken
+                        }
+                    }
             }
             catch
             {
@@ -175,6 +182,34 @@ namespace GunshotBleeding
 
             if (hasArmor)
             {
+                var caliber = GetCaliberFromShot(ev) ?? cfg.DefaultCaliber;
+                var isPenetrating = IsCaliberPenetrating(caliber, cfg);
+                var isResisted = IsCaliberResisted(caliber, cfg);
+
+                // Reduce damage for resisted calibers
+                if (isResisted)
+                {
+                    damage = damage * (1f - cfg.ArmorDamageReduction);
+                }
+
+                // Apply durability loss
+                try
+                {
+                    var loss = cfg.ArmorDurabilityLossPerHit * (isPenetrating ? cfg.ArmorPenetrationDurabilityLossMultiplier : 1f);
+                    armorDurability.AddOrUpdate(key, Plugin.Instance.Config.ArmorDurability - loss, (k, v) => Math.Max(0f, v - loss));
+                    if (armorDurability.TryGetValue(key, out var remaining) && remaining <= 0f)
+                    {
+                        // Armor broken
+                        PlayBleedFeedback(victim, "armorbreak");
+                        if (cfg.Debug)
+                            Log.Info($"[GunshotBleeding] Armor broken for {victim.Nickname}");
+                    }
+                }
+                catch
+                {
+                    // ignore durability errors
+                }
+
                 bloodTimer = (int)Math.Ceiling(bloodTimer * cfg.ArmorBleedDurationModifier);
                 bleed = bleed && random.NextDouble() * 100f <= cfg.ArmorBleedChanceModifier * 100f;
             }
@@ -199,11 +234,11 @@ namespace GunshotBleeding
                 if (state.Count >= cfg.ChestShotHitCount)
                 {
                     ev.CanHurt = false;
-                    skipNextHurting.Add(key);
-                    victim.Kill(DamageType.Firearm, "Chest trauma");
-                    chestHitHistory.Remove(key);
+                    skipNextHurting.TryAdd(key, 0);
+                    DoKill(victim, DamageType.Firearm, "Chest trauma", cfg.DefaultCaliber);
+                    chestHitHistory.TryRemove(key, out _);
 
-                    if (cfg.Debug)
+                    if (cfg.Debug || cfg.DebugMode)
                         Log.Info($"[GunshotBleeding] {ev.Player.Nickname} finished {victim.Nickname} with a second chest shot");
 
                     return;
@@ -211,23 +246,23 @@ namespace GunshotBleeding
             }
 
             damage = Math.Max(1f, damage);
+            // Prevent the engine from also applying default shot damage.
             ev.CanHurt = false;
-            skipNextHurting.Add(key);
-            victim.Hurt(damage, "Gunshot", string.Empty);
-
-            if (bleed && bloodTimer > 0)
+            skipNextHurting.TryAdd(key, 0);
+            try
             {
-                victim.EnableEffect(EffectType.Bleeding, bloodTimer);
-                ApplyBleedEffect(victim, bloodTimer, cfg.BleedDamagePerSecond, cfg.BleedTickIntervalSeconds);
-                ApplyInjuryState(victim, new BleedProfile { Duration = bloodTimer, DamagePerSecond = cfg.BleedDamagePerSecond, TickIntervalSeconds = cfg.BleedTickIntervalSeconds, Severity = bloodTimer >= cfg.HeavyBleedDuration ? "severe" : bloodTimer >= cfg.MediumBleedDuration ? "moderate" : "light", SourceName = "gunshot" });
-                PlayBleedFeedback(victim, "gunshot");
+                ProcessDamage(victim, damage, "Gunshot", cfg.DefaultCaliber, ev.Player, hitboxType.ToString(), (bleed && bloodTimer > 0) ? bloodTimer : 0, cfg.BleedDamagePerSecond, cfg.BleedTickIntervalSeconds, "gunshot");
+            }
+            catch
+            {
+                // Ignore processing failures to avoid server crashes on lag.
             }
 
-            if (cfg.Debug)
+            if (cfg.Debug || cfg.DebugMode)
                 Log.Info($"[GunshotBleeding] {ev.Player.Nickname} hit {victim.Nickname} in {hitboxType}, damage {damage}, bleed {bloodTimer}s");
         }
 
-        private void ApplyBleedEffect(Player player, int durationSeconds, float damagePerSecond, float tickIntervalSeconds)
+        private void ApplyBleedEffect(Player player, int durationSeconds, float damagePerSecond, float tickIntervalSeconds, string bodyPart = null)
         {
             if (player == null || durationSeconds <= 0 || damagePerSecond <= 0f)
                 return;
@@ -241,6 +276,8 @@ namespace GunshotBleeding
                 existing.DamagePerSecond = Math.Max(existing.DamagePerSecond, damagePerSecond);
                 existing.RemainingTicks = Math.Max(existing.RemainingTicks, GetTickCount(durationSeconds, tickIntervalSeconds));
                 existing.TickIntervalSeconds = Math.Min(existing.TickIntervalSeconds, tickIntervalSeconds);
+                if (!string.IsNullOrEmpty(bodyPart))
+                    existing.AffectedParts.Add(bodyPart);
                 return;
             }
 
@@ -251,34 +288,75 @@ namespace GunshotBleeding
                 TickIntervalSeconds = tickIntervalSeconds
             };
 
+            if (!string.IsNullOrEmpty(bodyPart))
+                state.AffectedParts.Add(bodyPart);
+
             activeBleeds[key] = state;
             StartBleedTick(player, key, state);
+            // Update HUD when bleed starts
+            UpdatePlayerHud(player);
+            if (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode)
+                Log.Info($"[GunshotBleeding] Bleed started for {player.Nickname}: {damagePerSecond} DPS for {durationSeconds}s (part={bodyPart})");
         }
 
         private void StartBleedTick(Player player, string key, BleedTickState state)
         {
             _ = Task.Run(async () =>
             {
-                while (activeBleeds.TryGetValue(key, out var currentState) && currentState.RemainingTicks > 0)
+                try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(Math.Max(0.25f, currentState.TickIntervalSeconds)));
+                    while (!isDisposed && activeBleeds.TryGetValue(key, out var currentState) && currentState.RemainingTicks > 0)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(Math.Max(0.25f, currentState.TickIntervalSeconds)));
 
-                    if (player == null || !player.IsConnected || !player.IsAlive || player.Health <= 0f)
-                        break;
+                        if (player == null || !player.IsConnected || !player.IsAlive || player.Health <= 0f)
+                            break;
 
-                    if (currentState.RemainingTicks <= 0)
-                        break;
+                        if (currentState.RemainingTicks <= 0)
+                            break;
 
-                    var perTickDamage = Math.Max(1f, currentState.DamagePerSecond * currentState.TickIntervalSeconds);
-                    skipNextHurting.Add(key);
-                    player.Hurt(perTickDamage, "Bleeding", string.Empty);
-                    PlayBleedFeedback(player, "bleed");
-                    currentState.RemainingTicks--;
+                        var perTickDamage = Math.Max(1f, currentState.DamagePerSecond * currentState.TickIntervalSeconds);
+                        skipNextHurting.TryAdd(key, 0);
+                        try
+                        {
+                            ProcessDamage(player, perTickDamage, "Bleeding", Plugin.Instance.Config.DefaultCaliber, null, "BleedTick", 0, 0f, currentState.TickIntervalSeconds, "bleed");
+                        }
+                        catch
+                        {
+                            // Ignore failures applying tick damage.
+                        }
+
+                        try
+                        {
+                            PlayBleedFeedback(player, "bleed");
+                        }
+                        catch
+                        {
+                            // Ignore feedback errors.
+                        }
+
+                        try
+                        {
+                            TriggerBleedVisuals(player, currentState.DamagePerSecond);
+                        }
+                        catch
+                        {
+                            // Ignore visual RPC failures.
+                        }
+
+                        currentState.RemainingTicks--;
+                    }
+                }
+                catch
+                {
+                    // Swallow exceptions from the bleed task to avoid crashing the server.
                 }
 
                 if (activeBleeds.ContainsKey(key))
                 {
-                    activeBleeds.Remove(key);
+                    activeBleeds.TryRemove(key, out _);
+                    if (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode)
+                        Log.Info($"[GunshotBleeding] Bleed ended for {player?.Nickname}");
                     StartRecoveryLoop(player, key);
                 }
             });
@@ -288,7 +366,7 @@ namespace GunshotBleeding
         {
             _ = Task.Run(async () =>
             {
-                while (player != null && player.IsConnected && player.IsAlive && player.Health > 0f)
+                while (!isDisposed && player != null && player.IsConnected && player.IsAlive && player.Health > 0f)
                 {
                     await Task.Delay(TimeSpan.FromSeconds(Math.Max(1f, Plugin.Instance.Config.RecoveryTickSeconds)));
 
@@ -301,14 +379,33 @@ namespace GunshotBleeding
                     state.RemainingSeverity = Math.Max(0f, state.RemainingSeverity - Plugin.Instance.Config.RecoveryAmountPerTick);
                     if (state.RemainingSeverity <= 0f)
                     {
-                        injuryStates.Remove(key);
+                        injuryStates.TryRemove(key, out _);
                         ResetInjuryDebuffs(player);
+                        UpdatePlayerHud(player);
                         break;
                     }
 
                     ApplyInjuryDebuffs(player, state);
                 }
             });
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                isDisposed = true;
+                activeBleeds.Clear();
+                injuryStates.Clear();
+                chestHitHistory.Clear();
+                skipNextHurting.Clear();
+                armorDurability.Clear();
+                lastHudText.Clear();
+            }
+            catch
+            {
+                // ignore
+            }
         }
 
         private void ApplyInjuryState(Player player, BleedProfile profile)
@@ -345,13 +442,13 @@ namespace GunshotBleeding
 
             try
             {
-                var movementSpeed = player.ReferenceHub.gameObject.GetComponent<UnityEngine.Component>() != null ? 0f : 0f;
-                if (movementSpeed < 0f)
-                    return;
+                var cfg = Plugin.Instance?.Config;
+                if (cfg != null && (cfg.Debug || cfg.DebugMode))
+                    Log.Info($"[GunshotBleeding] ApplyInjuryDebuffs: applied debuffs for {player.Nickname} (severity={state?.Severity})");
             }
             catch
             {
-                // Ignore.
+                // Ignore logging failures.
             }
         }
 
@@ -429,7 +526,7 @@ namespace GunshotBleeding
                     if (target == null)
                         continue;
 
-                    foreach (var methodName in new[] { "PlayAmbientSound", "RpcPlaySound", "PlaySound", "SendAudio", "PlayPainSound", "PlayGunSound" })
+                    foreach (var methodName in new[] { "PlayAmbientSound", "RpcPlaySound", "PlaySound", "SendAudio", "PlayPainSound", "PlayGunSound", "RpcShowDamageScreen", "RpcPlayScreenEffect", "RpcAddBlood", "RpcShowHitmarker", "RpcDisplayHitmarker" })
                     {
                         var method = target.GetType().GetMethod(methodName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
                         if (method == null)
@@ -477,6 +574,299 @@ namespace GunshotBleeding
             return Math.Max(1, (int)Math.Ceiling(durationSeconds / tickIntervalSeconds));
         }
 
+        private void DoKill(Player victim, DamageType type, string reason, string caliber)
+        {
+            if (victim == null)
+                return;
+
+            try
+            {
+                var killMethod = victim.GetType().GetMethod("Kill", new Type[] { typeof(DamageType), typeof(string), typeof(string) });
+                if (killMethod != null)
+                {
+                    killMethod.Invoke(victim, new object[] { type, reason, caliber });
+                    return;
+                }
+            }
+            catch
+            {
+                // Ignore reflection failures and fallback.
+            }
+
+            try
+            {
+                victim.Kill(type, reason);
+            }
+            catch
+            {
+                // Ignore runtime failures when attempting to kill.
+            }
+        }
+
+        private void TriggerBleedVisuals(Player player, float severity)
+        {
+            if (player == null || !Plugin.Instance.Config.BleedFeedbackEnabled)
+                return;
+
+            var hub = player.ReferenceHub;
+            if (hub == null)
+                return;
+
+            var paramSeverity = severity <= 0f ? 1 : (int)Math.Ceiling(severity);
+            var targetObjects = new object[] { player, hub };
+            foreach (var target in targetObjects)
+            {
+                if (target == null)
+                    continue;
+
+                foreach (var methodName in new[] { "RpcSpawnBloodDrip", "RpcAddBlood", "RpcShowDamageScreen", "RpcPlayScreenEffect", "RpcPlayHitmarker", "RpcDisplayHitmarker" })
+                {
+                    try
+                    {
+                        var method = target.GetType().GetMethod(methodName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                        if (method == null)
+                            continue;
+
+                        var parameters = method.GetParameters();
+                        if (parameters.Length == 0)
+                        {
+                            method.Invoke(target, null);
+                        }
+                        else if (parameters.Length == 1 && parameters[0].ParameterType == typeof(int))
+                        {
+                            method.Invoke(target, new object[] { paramSeverity });
+                        }
+                        else if (parameters.Length == 1 && parameters[0].ParameterType == typeof(string))
+                        {
+                            method.Invoke(target, new object[] { severity.ToString() });
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore any reflection/rpc invocation errors for visuals.
+                    }
+                }
+            }
+        }
+
+        private readonly ConcurrentDictionary<string, string> lastHudText = new ConcurrentDictionary<string, string>();
+
+        private void UpdatePlayerHud(Player player)
+        {
+            if (player == null || Plugin.Instance == null)
+                return;
+
+            var cfg = Plugin.Instance.Config;
+            var key = GetPlayerKey(player);
+            if (string.IsNullOrEmpty(key))
+                return;
+
+            var sb = new System.Text.StringBuilder();
+
+            // Armor HUD
+            if (cfg.EnableArmorHud)
+            {
+                if (armorDurability.TryGetValue(key, out var dur))
+                {
+                    sb.Append($"Armor: {Math.Round(dur)}% ");
+                }
+            }
+
+            // Bleed HUD
+            if (cfg.EnableBleedHud)
+            {
+                if (activeBleeds.TryGetValue(key, out var bleed))
+                {
+                    var severity = bleed.DamagePerSecond >= 3f ? "Heavy" : bleed.DamagePerSecond >= 1.5f ? "Moderate" : "Light";
+                    var remainingSec = Math.Ceiling(bleed.RemainingTicks * bleed.TickIntervalSeconds);
+                    sb.Append($"| Bleed: {severity} ({bleed.DamagePerSecond} dmg/s) {remainingSec}s");
+
+                    if (bleed.AffectedParts != null && bleed.AffectedParts.Count > 0)
+                    {
+                        sb.Append(" Parts:");
+                        foreach (var p in bleed.AffectedParts)
+                            sb.Append($" {p}");
+                    }
+                }
+            }
+
+            var text = sb.ToString().Trim();
+            if (text.Length == 0)
+            {
+                // Clear HUD if previously set
+                if (lastHudText.TryGetValue(key, out var prev) && !string.IsNullOrEmpty(prev))
+                {
+                    SendHudHint(player, string.Empty, 1);
+                    lastHudText[key] = string.Empty;
+                }
+                return;
+            }
+
+            if (text.Length > cfg.HudMaxLineLength)
+                text = text.Substring(0, cfg.HudMaxLineLength);
+
+            if (lastHudText.TryGetValue(key, out var last) && last == text)
+                return; // no change
+
+            SendHudHint(player, text, 8);
+            lastHudText[key] = text;
+        }
+
+        private void SendHudHint(Player player, string text, int durationSeconds)
+        {
+            if (player == null)
+                return;
+
+            try
+            {
+                // Prefer direct API if available
+                var method = player.GetType().GetMethod("ShowHint", new Type[] { typeof(string), typeof(int) });
+                if (method != null)
+                {
+                    method.Invoke(player, new object[] { text, durationSeconds });
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                if (Plugin.Instance?.Config != null && (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode))
+                    Log.Warn($"[GunshotBleeding] SendHudHint direct call failed: {ex.Message}");
+            }
+
+            // Fallback to reflection on ReferenceHub
+            try
+            {
+                var hub = player.ReferenceHub;
+                if (hub != null)
+                {
+                    var methodNames = new[] { "ShowHint", "DisplayHint", "SendHint", "SendConsoleMessage" };
+                    foreach (var name in methodNames)
+                    {
+                        try
+                        {
+                            var m = hub.GetType().GetMethod(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic, null, new Type[] { typeof(string), typeof(int) }, null);
+                            if (m != null)
+                            {
+                                m.Invoke(hub, new object[] { text, durationSeconds });
+                                return;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            if (Plugin.Instance?.Config != null && (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode))
+                                Log.Warn($"[GunshotBleeding] SendHudHint reflection {name} failed: {ex.Message}");
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void ProcessDamage(Player victim, float damage, string damageType, string caliber, Player attacker, string bodyPart, int bleedDuration, float bleedDamagePerSecond, float bleedTickIntervalSeconds, string sourceName)
+        {
+            if (isDisposed)
+                return;
+
+            if (victim == null || damage <= 0f)
+                return;
+
+            var cfg = Plugin.Instance.Config;
+            var key = GetPlayerKey(victim);
+
+            try
+            {
+                if (cfg.Debug || cfg.DebugMode)
+                    Log.Info($"[GunshotBleeding] ProcessDamage: {victim.Nickname} takes {damage} ({damageType}) from {(attacker?.Nickname ?? "env")}, part={bodyPart}");
+
+                // Armor handling
+                var hasArmor = false;
+                try
+                {
+                    if (victim != null && victim.Inventory != null)
+                        hasArmor = BodyArmorUtils.TryGetBodyArmor(victim.Inventory, out var armorItem);
+                }
+                catch
+                {
+                    hasArmor = false;
+                    if (cfg.Debug || cfg.DebugMode)
+                        Log.Warn("[GunshotBleeding] Failed to query armor via BodyArmorUtils.");
+                }
+
+                var isPenetrating = IsCaliberPenetrating(caliber, cfg);
+                var isResisted = IsCaliberResisted(caliber, cfg);
+
+                if (hasArmor)
+                {
+                    // If armor has a recorded durability and it's zero, treat as no armor
+                    var prior = armorDurability.GetOrAdd(key, k => cfg.ArmorDurability);
+                    if (prior <= 0f)
+                        hasArmor = false;
+                }
+
+                if (hasArmor && isResisted)
+                {
+                    var reduced = damage * (1f - cfg.ArmorDamageReduction);
+                    if (cfg.Debug || cfg.DebugMode)
+                        Log.Info($"[GunshotBleeding] Armor resisted: damage {damage}->{reduced}");
+                    damage = reduced;
+                }
+
+                if (hasArmor)
+                {
+                    try
+                    {
+                        var loss = cfg.ArmorDurabilityLossPerHit * (isPenetrating ? cfg.ArmorPenetrationDurabilityLossMultiplier : 1f);
+                        armorDurability.AddOrUpdate(key, cfg.ArmorDurability - loss, (k, v) => Math.Max(0f, v - loss));
+                        if (cfg.Debug || cfg.DebugMode)
+                            Log.Info($"[GunshotBleeding] Armor durability for {victim.Nickname} now {armorDurability[key]}");
+                        if (armorDurability.TryGetValue(key, out var remaining) && remaining <= 0f)
+                        {
+                            PlayBleedFeedback(victim, "armorbreak");
+                            if (cfg.Debug || cfg.DebugMode)
+                                Log.Info($"[GunshotBleeding] Armor broken for {victim.Nickname}");
+                        }
+                    }
+                    catch
+                    {
+                        if (cfg.Debug || cfg.DebugMode)
+                            Log.Warn("[GunshotBleeding] Failed to update armor durability.");
+                    }
+                }
+
+                // Apply damage via game API
+                try
+                {
+                    victim.Hurt(damage, damageType, caliber);
+                }
+                catch
+                {
+                    if (cfg.Debug || cfg.DebugMode)
+                        Log.Warn($"[GunshotBleeding] Hurt call failed for {victim.Nickname} ({damage}).");
+                }
+
+                // Apply bleeding if requested
+                if (bleedDuration > 0)
+                {
+                    if (cfg.UseBuiltInBleedingEffect)
+                        victim.EnableEffect(EffectType.Bleeding, bleedDuration);
+
+                    ApplyBleedEffect(victim, bleedDuration, bleedDamagePerSecond, bleedTickIntervalSeconds, bodyPart);
+                    ApplyInjuryState(victim, new BleedProfile { Duration = bleedDuration, DamagePerSecond = bleedDamagePerSecond, TickIntervalSeconds = bleedTickIntervalSeconds, Severity = bleedDuration >= cfg.HeavyBleedDuration ? "severe" : bleedDuration >= cfg.MediumBleedDuration ? "moderate" : "light", SourceName = sourceName });
+                    PlayBleedFeedback(victim, sourceName);
+                }
+
+                UpdatePlayerHud(victim);
+
+                if (cfg.Debug || cfg.DebugMode)
+                    Log.Info($"[GunshotBleeding] ProcessDamage completed for {victim.Nickname}: final damage {damage}");
+            }
+            catch (Exception ex)
+            {
+                if (cfg.Debug || cfg.DebugMode)
+                    Log.Error($"[GunshotBleeding] ProcessDamage exception: {ex}");
+            }
+        }
+
         private string GetPlayerKey(Player player)
         {
             if (player == null)
@@ -486,6 +876,85 @@ namespace GunshotBleeding
                 return player.UserId;
 
             return player.Id.ToString();
+        }
+
+        private string GetCaliberFromShot(ShotEventArgs ev)
+        {
+            if (ev == null)
+                return null;
+
+            try
+            {
+                var t = ev.GetType();
+                foreach (var name in new[] { "Caliber", "Calibre", "AmmoType", "ProjectileCaliber", "WeaponName", "WeaponId" })
+                {
+                    var prop = t.GetProperty(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (prop != null)
+                    {
+                        var val = prop.GetValue(ev);
+                        if (val != null)
+                            return val.ToString();
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            // Try attacker-held weapon info via reflection
+            try
+            {
+                var shooter = ev.Player;
+                if (shooter != null)
+                {
+                    var hub = shooter.ReferenceHub;
+                    if (hub != null)
+                    {
+                        var weaponProp = hub.GetType().GetProperty("CurItem", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                        if (weaponProp != null)
+                        {
+                            var cur = weaponProp.GetValue(hub);
+                            if (cur != null)
+                                return cur.ToString();
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return null;
+        }
+
+        private bool IsCaliberPenetrating(string caliber, Config cfg)
+        {
+            if (string.IsNullOrEmpty(caliber) || cfg == null)
+                return false;
+
+            foreach (var p in cfg.ArmorPenetratingCalibers)
+            {
+                if (caliber.IndexOf(p, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private bool IsCaliberResisted(string caliber, Config cfg)
+        {
+            if (string.IsNullOrEmpty(caliber) || cfg == null)
+                return false;
+
+            foreach (var p in cfg.ArmorResistantCalibers)
+            {
+                if (caliber.IndexOf(p, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            }
+
+            return false;
         }
 
         public void OnUpgradingPlayer(UpgradingPlayerEventArgs ev)
@@ -500,13 +969,195 @@ namespace GunshotBleeding
             var duration = ev.KnobSetting == Scp914.Scp914KnobSetting.Rough ? 6 : 8;
             var damagePerSecond = ev.KnobSetting == Scp914.Scp914KnobSetting.Rough ? 2.5f : 3f;
 
-            ev.Player.EnableEffect(EffectType.Bleeding, duration);
+            if (cfg.UseBuiltInBleedingEffect)
+                ev.Player.EnableEffect(EffectType.Bleeding, duration);
             ApplyBleedEffect(ev.Player, duration, damagePerSecond, 1f);
             ApplyInjuryState(ev.Player, new BleedProfile { Duration = duration, DamagePerSecond = damagePerSecond, TickIntervalSeconds = 1f, Severity = duration >= 8 ? "severe" : "moderate", SourceName = "scp914" });
             PlayBleedFeedback(ev.Player, "scp914");
 
             if (cfg.Debug)
                 Log.Info($"[GunshotBleeding] {ev.Player.Nickname} suffered SCP-914 {ev.KnobSetting} injury → bleed {duration}s");
+        }
+
+        public void OnDied(Exiled.Events.EventArgs.Player.DiedEventArgs ev)
+        {
+            if (ev == null || ev.Player == null)
+                return;
+
+            var cfg = Plugin.Instance.Config;
+
+            try
+            {
+                // Attempt to retrieve a Ragdoll/GameObject from the event via reflection
+                object ragdollObj = null;
+                var t = ev.GetType();
+                foreach (var name in new[] { "Ragdoll", "RagDoll", "RagdollObject", "DeadRagdoll", "RagdollGameObject" })
+                {
+                    var prop = t.GetProperty(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (prop != null)
+                    {
+                        ragdollObj = prop.GetValue(ev);
+                        break;
+                    }
+                }
+
+                // Some EXILED versions expose a 'Ragdoll' on the Player object
+                if (ragdollObj == null)
+                {
+                    try
+                    {
+                        var playerType = ev.Player.GetType();
+                        var prop = playerType.GetProperty("Ragdoll", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                        if (prop != null)
+                            ragdollObj = prop.GetValue(ev.Player);
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }
+
+                if (ragdollObj != null)
+                    AdjustRagdollPhysics(ragdollObj, cfg);
+            }
+            catch
+            {
+                // Do not let ragdoll adjustments crash the server.
+            }
+        }
+
+        private void AdjustRagdollPhysics(object ragdollObj, Config cfg)
+        {
+            if (ragdollObj == null || cfg == null)
+                return;
+
+            try
+            {
+                UnityEngine.GameObject go = null;
+
+                if (ragdollObj is UnityEngine.GameObject)
+                    go = (UnityEngine.GameObject)ragdollObj;
+                else if (ragdollObj is UnityEngine.Component)
+                    go = ((UnityEngine.Component)ragdollObj).gameObject;
+                else
+                {
+                    var prop = ragdollObj.GetType().GetProperty("gameObject", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (prop != null)
+                        go = prop.GetValue(ragdollObj) as UnityEngine.GameObject;
+                }
+
+                if (go == null)
+                    return;
+
+                var comps = go.GetComponentsInChildren<UnityEngine.Component>(true);
+                if (comps == null || comps.Length == 0)
+                    return;
+
+                var rigidbodies = new System.Collections.Generic.List<object>();
+                foreach (var comp in comps)
+                {
+                    if (comp == null)
+                        continue;
+
+                    var typeName = comp.GetType().Name;
+                    if (string.Equals(typeName, "Rigidbody", StringComparison.OrdinalIgnoreCase) || string.Equals(typeName, "Rigidbody2D", StringComparison.OrdinalIgnoreCase))
+                    {
+                        rigidbodies.Add(comp);
+                        try
+                        {
+                            var velProp = comp.GetType().GetProperty("velocity");
+                            var angVelProp = comp.GetType().GetProperty("angularVelocity");
+                            if (velProp != null)
+                                velProp.SetValue(comp, Activator.CreateInstance(velProp.PropertyType));
+                            if (angVelProp != null)
+                                angVelProp.SetValue(comp, Activator.CreateInstance(angVelProp.PropertyType));
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+
+                if (rigidbodies.Count == 0)
+                    return;
+
+                if (cfg.Debug || cfg.DebugMode)
+                    Log.Info($"[GunshotBleeding] AdjustRagdollPhysics: found {rigidbodies.Count} rigidbodies for ragdoll.");
+
+                foreach (var rb in rigidbodies)
+                {
+                    try
+                    {
+                        var tRb = rb.GetType();
+                        var massProp = tRb.GetProperty("mass");
+                        var dragProp = tRb.GetProperty("drag");
+                        var aDragProp = tRb.GetProperty("angularDrag");
+                        if (massProp != null && massProp.CanWrite && massProp.CanRead)
+                        {
+                            var cur = Convert.ToSingle(massProp.GetValue(rb));
+                            massProp.SetValue(rb, cur * cfg.RagdollMassMultiplier);
+                        }
+
+                        if (dragProp != null && dragProp.CanWrite && dragProp.CanRead)
+                        {
+                            var cur = Convert.ToSingle(dragProp.GetValue(rb));
+                            dragProp.SetValue(rb, Math.Max(cur, cfg.RagdollDrag));
+                        }
+
+                        if (aDragProp != null && aDragProp.CanWrite && aDragProp.CanRead)
+                        {
+                            var cur = Convert.ToSingle(aDragProp.GetValue(rb));
+                            aDragProp.SetValue(rb, Math.Max(cur, cfg.RagdollAngularDrag));
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (cfg.Debug || cfg.DebugMode)
+                            Log.Warn($"[GunshotBleeding] AdjustRagdollPhysics reflection failure: {ex.Message}");
+                    }
+                }
+
+                if (cfg.RagdollFreezeDuration > 0f)
+                {
+                    Task.Run(async () =>
+                    {
+                        try
+                        {
+                            foreach (var rb in rigidbodies)
+                            {
+                                try
+                                {
+                                    var isKin = rb.GetType().GetProperty("isKinematic");
+                                    if (isKin != null && isKin.CanWrite)
+                                        isKin.SetValue(rb, true);
+                                }
+                                catch { }
+                            }
+
+                            await Task.Delay(TimeSpan.FromSeconds(cfg.RagdollFreezeDuration));
+
+                            foreach (var rb in rigidbodies)
+                            {
+                                try
+                                {
+                                    var isKin = rb.GetType().GetProperty("isKinematic");
+                                    if (isKin != null && isKin.CanWrite)
+                                        isKin.SetValue(rb, false);
+                                }
+                                catch { }
+                            }
+                        }
+                        catch
+                        {
+                            // ignore
+                        }
+                    });
+                }
+            }
+            catch
+            {
+                // swallow
+            }
         }
 
         public void OnUsedItem(UsedItemEventArgs ev)
@@ -520,7 +1171,10 @@ namespace GunshotBleeding
             ev.Player.DisableEffect(EffectType.Bleeding);
             RemoveBleedEffect(ev.Player);
             ResetInjuryDebuffs(ev.Player);
-            injuryStates.Remove(GetPlayerKey(ev.Player));
+            injuryStates.TryRemove(GetPlayerKey(ev.Player), out _);
+
+            // Update HUD when medkit stops bleeding
+            UpdatePlayerHud(ev.Player);
 
             if (Plugin.Instance.Config.Debug)
                 Log.Info($"[GunshotBleeding] {ev.Player.Nickname} used Medkit and stopped bleeding");
@@ -533,7 +1187,14 @@ namespace GunshotBleeding
 
             var key = GetPlayerKey(player);
             if (!string.IsNullOrEmpty(key))
-                activeBleeds.Remove(key);
+            {
+                activeBleeds.TryRemove(key, out _);
+                if (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode)
+                    Log.Info($"[GunshotBleeding] RemoveBleedEffect: removed bleed for {player.Nickname}");
+            }
+
+            // Update HUD when bleeding removed
+            UpdatePlayerHud(player);
         }
     }
 }

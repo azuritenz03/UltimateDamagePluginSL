@@ -8,7 +8,7 @@
       "version": "1.0.0",
       "restore": {
         "projectUniqueName": "/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/GunshotBleeding.csproj",
-        "projectName": "BleedingRealism",
+        "projectName": "UltimateDamagePlugin",
         "projectPath": "/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/GunshotBleeding.csproj",
         "packagesPath": "/home/codespace/.nuget/packages/",
         "outputPath": "/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/",

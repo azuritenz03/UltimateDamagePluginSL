@@ -12,7 +12,7 @@
 /workspaces/BleedingPlugin-SCPSL/GunshotBleeding/bin/Release/net48/Mirror.dll
 /workspaces/BleedingPlugin-SCPSL/GunshotBleeding/bin/Release/net48/UnityEngine.CoreModule.dll
 /workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/Release/net48/GunshotB.4A5E50E2.Up2Date
-/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/bin/Release/net48/BleedingRealism.dll
-/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/bin/Release/net48/BleedingRealism.pdb
-/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/Release/net48/BleedingRealism.dll
-/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/Release/net48/BleedingRealism.pdb
+/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/bin/Release/net48/UltimateDamagePlugin.dll
+/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/bin/Release/net48/UltimateDamagePlugin.pdb
+/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/Release/net48/UltimateDamagePlugin.dll
+/workspaces/BleedingPlugin-SCPSL/GunshotBleeding/obj/Release/net48/UltimateDamagePlugin.pdb
