@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("UltimateDamagePlugin")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+87a89717fda92298a8d421a397d0319bf5f9a2dc")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+6f198098bb8c50236e929296e25d35b751c4a740")]
 [assembly: System.Reflection.AssemblyProductAttribute("UltimateDamagePlugin")]
 [assembly: System.Reflection.AssemblyTitleAttribute("UltimateDamagePlugin")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

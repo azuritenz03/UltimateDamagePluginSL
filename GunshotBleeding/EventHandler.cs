@@ -69,8 +69,9 @@ namespace UltimateDamagePlugin
                     var profile = CreateNonHumanBleedProfile(ev.Attacker, ev.Amount, cfg);
                     if (profile != null && profile.Duration > 0)
                     {
-                        // Centralized handling: ProcessDamage will apply Hurt, bleed and HUD updates
-                        ProcessDamage(ev.Player, ev.Amount, "Environmental", cfg.DefaultCaliber, ev.Attacker, null, profile.Duration, profile.DamagePerSecond, profile.TickIntervalSeconds, profile.SourceName);
+                        // Centralized handling: use descriptive damageType from profile.SourceName when available
+                        var damageType = string.IsNullOrEmpty(profile.SourceName) ? "Environmental" : profile.SourceName;
+                        ProcessDamage(ev.Player, ev.Amount, damageType, cfg.DefaultCaliber, ev.Attacker, null, profile.Duration, profile.DamagePerSecond, profile.TickIntervalSeconds, profile.SourceName);
                     }
                 }
 
@@ -109,11 +110,13 @@ namespace UltimateDamagePlugin
 
         public void OnShot(ShotEventArgs ev)
         {
-            if (ev.Player == null || ev.Target == null || ev.Hitbox == null)
-                return;
+            try
+            {
+                if (ev.Player == null || ev.Target == null || ev.Hitbox == null)
+                    return;
 
-            if (!ev.Player.IsHuman || !ev.Target.IsHuman)
-                return;
+                if (!ev.Player.IsHuman || !ev.Target.IsHuman)
+                    return;
 
             var cfg = Plugin.Instance.Config;
             var victim = ev.Target;
@@ -260,6 +263,13 @@ namespace UltimateDamagePlugin
 
             if (cfg.Debug || cfg.DebugMode)
                 Log.Info($"[GunshotBleeding] {ev.Player.Nickname} hit {victim.Nickname} in {hitboxType}, damage {damage}, bleed {bloodTimer}s");
+        }
+            catch (Exception ex)
+            {
+                var cfg2 = Plugin.Instance?.Config;
+                if (cfg2 != null && (cfg2.Debug || cfg2.DebugMode))
+                    Log.Error($"[GunshotBleeding] OnShot exception: {ex}");
+            }
         }
 
         private void ApplyBleedEffect(Player player, int durationSeconds, float damagePerSecond, float tickIntervalSeconds, string bodyPart = null)
@@ -833,15 +843,71 @@ namespace UltimateDamagePlugin
                     }
                 }
 
-                // Apply damage via game API
+                // Prevent non-human attackers (SCPs, hazards) from instantly killing via overly large damage values.
                 try
                 {
-                    victim.Hurt(damage, damageType, caliber);
+                    if ((attacker == null || !attacker.IsHuman) && damage >= victim.Health)
+                    {
+                        var capped = Math.Max(1f, victim.Health - 1f);
+                        if (cfg.Debug || cfg.DebugMode)
+                            Log.Info($"[GunshotBleeding] Capping non-human damage {damage} -> {capped} for {victim.Nickname}");
+                        damage = capped;
+                    }
                 }
-                catch
+                catch { }
+
+                // Apply damage via game API (use reflection to tolerate multiple EXILED signatures)
+                try
+                {
+                    var hurtCalled = false;
+                    var vType = victim.GetType();
+                    // Try (float, string, string)
+                    var m = vType.GetMethod("Hurt", new Type[] { typeof(float), typeof(string), typeof(string) });
+                    if (m != null)
+                    {
+                        m.Invoke(victim, new object[] { damage, damageType, caliber });
+                        hurtCalled = true;
+                    }
+
+                    if (!hurtCalled)
+                    {
+                        // Try (float, string)
+                        m = vType.GetMethod("Hurt", new Type[] { typeof(float), typeof(string) });
+                        if (m != null)
+                        {
+                            m.Invoke(victim, new object[] { damage, damageType });
+                            hurtCalled = true;
+                        }
+                    }
+
+                    if (!hurtCalled)
+                    {
+                        // Try (float)
+                        m = vType.GetMethod("Hurt", new Type[] { typeof(float) });
+                        if (m != null)
+                        {
+                            m.Invoke(victim, new object[] { damage });
+                            hurtCalled = true;
+                        }
+                    }
+
+                    if (!hurtCalled)
+                    {
+                        // As a last resort, try Victim.Kill when damage >= health
+                        if (victim.Health <= damage)
+                        {
+                            DoKill(victim, DamageType.Unknown, damageType ?? "unknown", caliber);
+                        }
+                        else if (cfg.Debug || cfg.DebugMode)
+                        {
+                            Log.Warn($"[GunshotBleeding] No suitable Hurt overload found for victim; damage skipped.");
+                        }
+                    }
+                }
+                catch (Exception ex)
                 {
                     if (cfg.Debug || cfg.DebugMode)
-                        Log.Warn($"[GunshotBleeding] Hurt call failed for {victim.Nickname} ({damage}).");
+                        Log.Warn($"[GunshotBleeding] Hurt call reflection failed for {victim.Nickname}: {ex.Message}");
                 }
 
                 // Apply bleeding if requested
@@ -1017,8 +1083,8 @@ namespace UltimateDamagePlugin
                     }
                 }
 
-                if (ragdollObj != null)
-                    AdjustRagdollPhysics(ragdollObj, cfg);
+                // Do not adjust ragdoll physics — heavy-body adjustments caused server lag.
+                // Ragdoll tuning removed to avoid server performance issues.
             }
             catch
             {
