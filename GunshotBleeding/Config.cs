@@ -38,7 +38,20 @@ namespace GunshotBleeding
         public int MediumBleedDuration { get; set; } = 10;
         public int HeavyBleedDuration { get; set; } = 20;
 
-        public float BleedDamagePerSecond { get; set; } = 1.5f;
+        public float BleedDamagePerSecond { get; set; } = 2f;
+        public float BleedTickIntervalSeconds { get; set; } = 1f;
+        public bool BleedFeedbackEnabled { get; set; } = true;
         public float HumanDamageMultiplier { get; set; } = 1.25f;
+
+        public bool EnableInjuryDebuffs { get; set; } = true;
+        public float SevereBleedMovementPenalty { get; set; } = 0.25f;
+        public float SevereBleedAimPenalty { get; set; } = 0.2f;
+        public float RecoveryTickSeconds { get; set; } = 5f;
+        public float RecoveryAmountPerTick { get; set; } = 1f;
+        public float MedkitRecoveryAmount { get; set; } = 3f;
+        public float FallInjuryThreshold { get; set; } = 12f;
+        public float FallInjuryChance { get; set; } = 0.35f;
+        public float HazardInjuryChance { get; set; } = 0.25f;
+        public float HazardInjuryDamageMultiplier { get; set; } = 1.2f;
     }
 }

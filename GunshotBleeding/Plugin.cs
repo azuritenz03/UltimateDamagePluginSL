@@ -15,6 +15,7 @@ namespace GunshotBleeding
             Exiled.Events.Handlers.Player.Hurting += handler.OnHurting;
             Exiled.Events.Handlers.Player.Shot += handler.OnShot;
             Exiled.Events.Handlers.Player.UsedItem += handler.OnUsedItem;
+            Exiled.Events.Handlers.Scp914.UpgradingPlayer += handler.OnUpgradingPlayer;
             base.OnEnabled();
         }
 
@@ -23,6 +24,7 @@ namespace GunshotBleeding
             Exiled.Events.Handlers.Player.Hurting -= handler.OnHurting;
             Exiled.Events.Handlers.Player.Shot -= handler.OnShot;
             Exiled.Events.Handlers.Player.UsedItem -= handler.OnUsedItem;
+            Exiled.Events.Handlers.Scp914.UpgradingPlayer -= handler.OnUpgradingPlayer;
             handler = null;
             Instance = null;
             base.OnDisabled();
