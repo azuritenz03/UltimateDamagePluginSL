@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 using Exiled.API.Enums;
@@ -39,7 +40,7 @@ namespace UltimateDamagePlugin
 
         private void ApplyBleedEffect(Player player, int durationSeconds, float damagePerSecond, float tickIntervalSeconds, string bodyPart = null)
         {
-            if (player == null || durationSeconds <= 0 || damagePerSecond <= 0f)
+            if (player == null || !player.IsAlive || durationSeconds <= 0 || damagePerSecond <= 0f)
                 return;
 
             var key = GetPlayerKey(player);
@@ -90,10 +91,15 @@ namespace UltimateDamagePlugin
                             break;
 
                         var perTickDamage = Math.Max(1f, currentState.DamagePerSecond * currentState.TickIntervalSeconds);
-                        skipNextHurting.TryAdd(key, 0);
+
                         try
                         {
-                            ProcessDamage(player, perTickDamage, "Bleeding", Plugin.Instance.Config.DefaultCaliber, null, "BleedTick", 0, 0f, currentState.TickIntervalSeconds, "bleed", true, false);
+                            var victim = player;
+                            if (victim != null && victim.IsConnected && victim.IsAlive && victim.Health > 0f)
+                            {
+                                skipNextHurting.TryAdd(key, 0);
+                                ProcessDamage(victim, perTickDamage, "Bleeding", Plugin.Instance.Config.DefaultCaliber, null, "BleedTick", 0, 0f, currentState.TickIntervalSeconds, "bleed", true, false);
+                            }
                         }
                         catch
                         {
@@ -171,6 +177,8 @@ namespace UltimateDamagePlugin
             {
                 activeBleeds.Clear();
                 injuryStates.Clear();
+                skipNextHurting.Clear();
+                lastHudText.Clear();
             }
             catch
             {
@@ -178,9 +186,37 @@ namespace UltimateDamagePlugin
             }
         }
 
+        private void CleanupPlayerState(Player player, string key)
+        {
+            if (string.IsNullOrEmpty(key))
+                return;
+
+            activeBleeds.TryRemove(key, out _);
+            injuryStates.TryRemove(key, out _);
+            skipNextHurting.TryRemove(key, out _);
+            lastHudText.TryRemove(key, out _);
+            armorDurability.TryRemove(key, out _);
+
+            try
+            {
+                ResetInjuryDebuffs(player);
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                RemoveBleedEffect(player);
+            }
+            catch
+            {
+            }
+        }
+
         private void ApplyInjuryState(Player player, BleedProfile profile)
         {
-            if (player == null)
+            if (player == null || !player.IsAlive)
                 return;
 
             var severity = profile.Severity ?? "light";
@@ -421,7 +457,8 @@ namespace UltimateDamagePlugin
                     Log.Info($"[GunshotBleeding] RemoveBleedEffect: removed bleed for {player.Nickname}");
             }
 
-            UpdatePlayerHud(player);
+            if (player.IsAlive)
+                UpdatePlayerHud(player);
         }
     }
 }

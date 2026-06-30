@@ -112,7 +112,10 @@ namespace UltimateDamagePlugin
                     {
                         if (victim.Health <= damage)
                         {
-                            DoKill(victim, DamageType.Unknown, damageType ?? "unknown", caliber);
+                            var reasonText = string.Equals(sourceName, "bleed", StringComparison.OrdinalIgnoreCase) || string.Equals(bodyPart, "BleedTick", StringComparison.OrdinalIgnoreCase)
+                                ? "Died from blood loss"
+                                : "Bullet holes found in body";
+                            DoKill(victim, DamageType.Firearm, reasonText, caliber);
                         }
                         else if (cfg.Debug || cfg.DebugMode)
                         {

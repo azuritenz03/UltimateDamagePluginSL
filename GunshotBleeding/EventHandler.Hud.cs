@@ -13,7 +13,7 @@ namespace UltimateDamagePlugin
 
         private void UpdatePlayerHud(Player player)
         {
-            if (player == null || Plugin.Instance == null)
+            if (player == null || Plugin.Instance == null || !player.IsAlive)
                 return;
 
             var cfg = Plugin.Instance.Config;

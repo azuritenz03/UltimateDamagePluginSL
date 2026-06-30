@@ -36,7 +36,7 @@ namespace UltimateDamagePlugin
                 {
                     ev.CanHurt = false;
                     skipNextHurting.TryAdd(key, 0);
-                    DoKill(victim, DamageType.Firearm, "Headshot", cfg.DefaultCaliber);
+                    DoKill(victim, DamageType.Firearm, "Bullet wound to the head", cfg.DefaultCaliber);
 
                     if (cfg.Debug || cfg.DebugMode)
                         Log.Info($"[GunshotBleeding] {ev.Player.Nickname} scored headshot on {victim.Nickname}");
@@ -69,7 +69,7 @@ namespace UltimateDamagePlugin
                 var bleedProfile = CreateBleedProfile(damage, hitboxType, cfg);
                 ev.CanHurt = false;
                 skipNextHurting.TryAdd(key, 0);
-                ProcessDamage(victim, damage, "Firearm", cfg.DefaultCaliber, ev.Player, hitboxType.ToString(), bleedProfile.Duration, bleedProfile.DamagePerSecond, bleedProfile.TickIntervalSeconds, "gunshot", true, false);
+                ProcessDamage(victim, damage, "Bullet wound", cfg.DefaultCaliber, ev.Player, hitboxType.ToString(), bleedProfile.Duration, bleedProfile.DamagePerSecond, bleedProfile.TickIntervalSeconds, "gunshot", true, false);
 
                 if (cfg.Debug || cfg.DebugMode)
                     Log.Info($"[GunshotBleeding] {ev.Player.Nickname} hit {victim.Nickname} in {hitboxType}, damage={damage}, bleed={bleedProfile.Duration}s, severity={bleedProfile.Severity}");

@@ -36,6 +36,15 @@ namespace UltimateDamagePlugin
 
             try
             {
+                var key = GetPlayerKey(ev.Player);
+                CleanupPlayerState(ev.Player, key);
+            }
+            catch
+            {
+            }
+
+            try
+            {
                 object ragdollObj = null;
                 var t = ev.GetType();
                 foreach (var name in new[] { "Ragdoll", "RagDoll", "RagdollObject", "DeadRagdoll", "RagdollGameObject" })
@@ -123,6 +132,15 @@ namespace UltimateDamagePlugin
         {
             if (victim == null)
                 return;
+
+            try
+            {
+                var key = GetPlayerKey(victim);
+                CleanupPlayerState(victim, key);
+            }
+            catch
+            {
+            }
 
             try
             {
