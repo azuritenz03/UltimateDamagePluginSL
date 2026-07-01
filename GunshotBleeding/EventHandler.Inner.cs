@@ -83,6 +83,10 @@ namespace UltimateDamagePlugin
                 isDisposed = true;
                 activeBleeds.Clear();
                 injuryStates.Clear();
+                foreach (var entry in bleedCoroutines.ToArray())
+                    CancelBleedForPlayer(entry.Key);
+                foreach (var entry in recoveryCoroutines.ToArray())
+                    CancelRecoveryForPlayer(entry.Key);
                 skipNextHurting.Clear();
                 armorDurability.Clear();
                 lastHudText.Clear();

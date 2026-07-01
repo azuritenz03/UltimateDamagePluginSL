@@ -3,9 +3,9 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Threading.Tasks;
 using Exiled.API.Enums;
 using Exiled.API.Features;
+using MEC;
 
 namespace UltimateDamagePlugin
 {
@@ -13,6 +13,37 @@ namespace UltimateDamagePlugin
     {
         private readonly ConcurrentDictionary<string, BleedTickState> activeBleeds = new ConcurrentDictionary<string, BleedTickState>();
         private readonly ConcurrentDictionary<string, InjuryState> injuryStates = new ConcurrentDictionary<string, InjuryState>();
+        private readonly ConcurrentDictionary<string, CoroutineHandle> bleedCoroutines = new ConcurrentDictionary<string, CoroutineHandle>();
+        private readonly ConcurrentDictionary<string, CoroutineHandle> recoveryCoroutines = new ConcurrentDictionary<string, CoroutineHandle>();
+        private static readonly string[] FeedbackMethodNames = { "PlayAmbientSound", "RpcPlaySound", "PlaySound", "SendAudio", "PlayPainSound", "PlayGunSound", "RpcShowDamageScreen", "RpcPlayScreenEffect", "RpcAddBlood", "RpcShowHitmarker", "RpcDisplayHitmarker" };
+        private static readonly string[] VisualMethodNames = { "RpcSpawnBloodDrip", "RpcAddBlood", "RpcShowDamageScreen", "RpcPlayScreenEffect", "RpcPlayHitmarker", "RpcDisplayHitmarker" };
+        private static readonly Dictionary<Type, Dictionary<string, MethodInfo>> CachedMethodLookup = new Dictionary<Type, Dictionary<string, MethodInfo>>();
+        private static readonly Dictionary<Type, MethodInfo> CachedRagdollMethods = new Dictionary<Type, MethodInfo>();
+
+        static EventHandler()
+        {
+            var targetTypes = new List<Type> { typeof(Player) };
+            var referenceHubType = typeof(Player).Assembly.GetType("ReferenceHub");
+            if (referenceHubType != null)
+                targetTypes.Add(referenceHubType);
+
+            foreach (var targetType in targetTypes.Distinct())
+            {
+                var methods = new Dictionary<string, MethodInfo>(StringComparer.OrdinalIgnoreCase);
+                foreach (var methodName in FeedbackMethodNames.Concat(VisualMethodNames))
+                {
+                    var method = targetType.GetMethod(methodName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (method != null)
+                        methods[methodName] = method;
+                }
+
+                CachedMethodLookup[targetType] = methods;
+
+                var ragdollMethod = targetType.GetMethod("Ragdoll", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                if (ragdollMethod != null)
+                    CachedRagdollMethods[targetType] = ragdollMethod;
+            }
+        }
 
         private class BleedTickState
         {
@@ -85,101 +116,194 @@ namespace UltimateDamagePlugin
                 Log.Info($"[GunshotBleeding] Bleed started for {player.Nickname}: severity={severity} for {durationSeconds}s (part={bodyPart})");
         }
 
+        private void CancelBleedForPlayer(string key)
+        {
+            if (string.IsNullOrEmpty(key))
+                return;
+
+            if (bleedCoroutines.TryGetValue(key, out var handle) && handle.IsValid)
+            {
+                try
+                {
+                    Timing.KillCoroutines(handle);
+                }
+                catch
+                {
+                }
+            }
+
+            bleedCoroutines.TryRemove(key, out _);
+        }
+
         private void StartBleedTick(Player player, string key, BleedTickState state)
         {
             if (player == null || string.IsNullOrEmpty(key) || state == null)
                 return;
 
-            _ = RunBleedTickAsync(player, key, state);
+            CancelBleedForPlayer(key);
+            var handle = Timing.RunCoroutine(RunBleedTickCoroutine(key, state), Segment.Update);
+            bleedCoroutines[key] = handle;
         }
 
-        private async Task RunBleedTickAsync(Player player, string key, BleedTickState state)
+        private IEnumerator<float> RunBleedTickCoroutine(string key, BleedTickState state)
         {
-            while (!isDisposed && activeBleeds.TryGetValue(key, out var currentState) && currentState.RemainingTicks > 0)
+            try
             {
-                await Task.Delay(TimeSpan.FromSeconds(Math.Max(0.25f, currentState.TickIntervalSeconds))).ConfigureAwait(false);
-
-                if (player == null || !player.IsConnected || !player.IsAlive || player.Health <= 0f)
-                    break;
-
-                if (currentState.RemainingTicks <= 0)
-                    break;
-
-                try
+                while (!isDisposed
+                    && activeBleeds.TryGetValue(key, out var currentState)
+                    && currentState.RemainingTicks > 0)
                 {
-                    PlayBleedFeedback(player, "bleed");
-                }
-                catch
-                {
-                    // Ignore feedback errors.
-                }
+                    Player currentPlayer = null;
+                    try
+                    {
+                        currentPlayer = Player.Get(key);
+                    }
+                    catch
+                    {
+                        currentPlayer = null;
+                    }
 
-                try
-                {
+                    if (currentPlayer == null || !currentPlayer.IsConnected || !currentPlayer.IsAlive || currentPlayer.Health <= 0f)
+                        break;
+
+                    if (!activeBleeds.TryGetValue(key, out currentState) || currentState.RemainingTicks <= 0)
+                        break;
+
+                    yield return Timing.WaitForSeconds(Math.Max(0.25f, currentState.TickIntervalSeconds));
+
+                    if (isDisposed)
+                        break;
+
+                    try
+                    {
+                        currentPlayer = Player.Get(key);
+                    }
+                    catch
+                    {
+                        currentPlayer = null;
+                    }
+
+                    if (currentPlayer == null || !currentPlayer.IsConnected || !currentPlayer.IsAlive || currentPlayer.Health <= 0f)
+                        break;
+
+                    if (!activeBleeds.TryGetValue(key, out currentState) || currentState.RemainingTicks <= 0)
+                        break;
+
+                    PlayBleedFeedback(currentPlayer, "bleed");
+
                     var perTickDamage = currentState.DamagePerSecond * currentState.TickIntervalSeconds;
-                    if (player != null && player.IsAlive && perTickDamage > 0f)
+                    if (currentPlayer != null && currentPlayer.IsAlive && perTickDamage > 0f)
                     {
                         skipNextHurting.TryAdd(key, 0);
-                        ProcessDamage(player, perTickDamage, "Bleeding", Plugin.Instance.Config.DefaultCaliber, null, "BleedTick", 0, currentState.TickIntervalSeconds, "bleed", "bleed", true, false);
+                        ProcessDamage(currentPlayer, perTickDamage, "Bleeding", Plugin.Instance.Config.DefaultCaliber, null, "BleedTick", 0, currentState.TickIntervalSeconds, "bleed", "bleed", true, false);
                     }
-                }
-                catch
-                {
-                    // Ignore failures applying tick damage.
-                }
 
-                try
-                {
-                    TriggerBleedVisuals(player, currentState.Severity);
+                    TriggerBleedVisuals(currentPlayer, currentState.Severity);
+                    currentState.RemainingTicks = Math.Max(0, currentState.RemainingTicks - 1);
+                    UpdatePlayerHud(currentPlayer);
                 }
-                catch
-                {
-                    // Ignore visual RPC failures.
-                }
-
-                currentState.RemainingTicks--;
-                UpdatePlayerHud(player);
             }
-
-            if (activeBleeds.ContainsKey(key))
+            finally
             {
-                activeBleeds.TryRemove(key, out _);
-                if (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode)
-                    Log.Info($"[GunshotBleeding] Bleed ended for {player?.Nickname}");
-                StartRecoveryLoop(player, key);
+                bleedCoroutines.TryRemove(key, out _);
+
+                if (!isDisposed && activeBleeds.ContainsKey(key))
+                {
+                    activeBleeds.TryRemove(key, out _);
+                    if (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode)
+                        Log.Info($"[GunshotBleeding] Bleed ended for {key}");
+                    StartRecoveryLoop(key);
+                }
             }
         }
 
-        private void StartRecoveryLoop(Player player, string key)
+        private void CancelRecoveryForPlayer(string key)
         {
-            if (player == null || string.IsNullOrEmpty(key) || !player.IsAlive)
+            if (string.IsNullOrEmpty(key))
                 return;
 
-            _ = RunRecoveryLoopAsync(player, key);
+            if (recoveryCoroutines.TryGetValue(key, out var handle) && handle.IsValid)
+            {
+                try
+                {
+                    Timing.KillCoroutines(handle);
+                }
+                catch
+                {
+                }
+            }
+
+            recoveryCoroutines.TryRemove(key, out _);
         }
 
-        private async Task RunRecoveryLoopAsync(Player player, string key)
+        private void StartRecoveryLoop(string key)
         {
-            while (!isDisposed && player != null && player.IsConnected && player.IsAlive && player.Health > 0f)
+            if (string.IsNullOrEmpty(key))
+                return;
+
+            CancelRecoveryForPlayer(key);
+            var handle = Timing.RunCoroutine(RunRecoveryLoopCoroutine(key), Segment.Update);
+            recoveryCoroutines[key] = handle;
+        }
+
+        private IEnumerator<float> RunRecoveryLoopCoroutine(string key)
+        {
+            try
             {
-                await Task.Delay(TimeSpan.FromSeconds(Math.Max(1f, Plugin.Instance.Config.RecoveryTickSeconds))).ConfigureAwait(false);
-
-                if (player == null || !player.IsConnected || !player.IsAlive || player.Health <= 0f)
-                    break;
-
-                if (!injuryStates.TryGetValue(key, out var state))
-                    break;
-
-                state.RemainingSeverity = Math.Max(0f, state.RemainingSeverity - Plugin.Instance.Config.RecoveryAmountPerTick);
-                if (state.RemainingSeverity <= 0f)
+                while (!isDisposed)
                 {
-                    injuryStates.TryRemove(key, out _);
-                    ResetInjuryDebuffs(player);
-                    UpdatePlayerHud(player);
-                    break;
-                }
+                    Player currentPlayer = null;
+                    try
+                    {
+                        currentPlayer = Player.Get(key);
+                    }
+                    catch
+                    {
+                        currentPlayer = null;
+                    }
 
-                ApplyInjuryDebuffs(player, state);
+                    if (currentPlayer == null || !currentPlayer.IsConnected || !currentPlayer.IsAlive || currentPlayer.Health <= 0f)
+                        break;
+
+                    if (!injuryStates.ContainsKey(key))
+                        break;
+
+                    yield return Timing.WaitForSeconds(Math.Max(1f, Plugin.Instance.Config.RecoveryTickSeconds));
+
+                    if (isDisposed)
+                        break;
+
+                    currentPlayer = null;
+                    try
+                    {
+                        currentPlayer = Player.Get(key);
+                    }
+                    catch
+                    {
+                        currentPlayer = null;
+                    }
+
+                    if (currentPlayer == null || !currentPlayer.IsConnected || !currentPlayer.IsAlive || currentPlayer.Health <= 0f)
+                        break;
+
+                    if (!injuryStates.TryGetValue(key, out var state))
+                        break;
+
+                    state.RemainingSeverity = Math.Max(0f, state.RemainingSeverity - Plugin.Instance.Config.RecoveryAmountPerTick);
+                    if (state.RemainingSeverity <= 0f)
+                    {
+                        injuryStates.TryRemove(key, out _);
+                        ResetInjuryDebuffs(currentPlayer);
+                        UpdatePlayerHud(currentPlayer);
+                        break;
+                    }
+
+                    ApplyInjuryDebuffs(currentPlayer, state);
+                }
+            }
+            finally
+            {
+                recoveryCoroutines.TryRemove(key, out _);
             }
         }
 
@@ -189,6 +313,10 @@ namespace UltimateDamagePlugin
             {
                 activeBleeds.Clear();
                 injuryStates.Clear();
+                foreach (var entry in bleedCoroutines.ToArray())
+                    CancelBleedForPlayer(entry.Key);
+                foreach (var entry in recoveryCoroutines.ToArray())
+                    CancelRecoveryForPlayer(entry.Key);
                 skipNextHurting.Clear();
                 lastHudText.Clear();
             }
@@ -203,6 +331,8 @@ namespace UltimateDamagePlugin
             if (string.IsNullOrEmpty(key))
                 return;
 
+            CancelBleedForPlayer(key);
+            CancelRecoveryForPlayer(key);
             activeBleeds.TryRemove(key, out _);
             injuryStates.TryRemove(key, out _);
             skipNextHurting.TryRemove(key, out _);
@@ -326,6 +456,44 @@ namespace UltimateDamagePlugin
             }
         }
 
+        private static MethodInfo GetCachedMethod(Type targetType, string methodName)
+        {
+            if (targetType == null || string.IsNullOrEmpty(methodName))
+                return null;
+
+            if (CachedMethodLookup.TryGetValue(targetType, out var methods) && methods.TryGetValue(methodName, out var method))
+                return method;
+
+            var resolvedMethod = targetType.GetMethod(methodName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+            if (resolvedMethod != null)
+            {
+                if (!CachedMethodLookup.TryGetValue(targetType, out methods))
+                {
+                    methods = new Dictionary<string, MethodInfo>(StringComparer.OrdinalIgnoreCase);
+                    CachedMethodLookup[targetType] = methods;
+                }
+
+                methods[methodName] = resolvedMethod;
+            }
+
+            return resolvedMethod;
+        }
+
+        private static MethodInfo GetCachedRagdollMethod(Type targetType)
+        {
+            if (targetType == null)
+                return null;
+
+            if (CachedRagdollMethods.TryGetValue(targetType, out var method))
+                return method;
+
+            var resolvedMethod = targetType.GetMethod("Ragdoll", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+            if (resolvedMethod != null)
+                CachedRagdollMethods[targetType] = resolvedMethod;
+
+            return resolvedMethod;
+        }
+
         private BleedProfile CreateBleedProfile(float amount, HitboxType hitboxType, Config cfg)
         {
             if (hitboxType == HitboxType.Limb)
@@ -393,9 +561,9 @@ namespace UltimateDamagePlugin
                     if (target == null)
                         continue;
 
-                    foreach (var methodName in new[] { "PlayAmbientSound", "RpcPlaySound", "PlaySound", "SendAudio", "PlayPainSound", "PlayGunSound", "RpcShowDamageScreen", "RpcPlayScreenEffect", "RpcAddBlood", "RpcShowHitmarker", "RpcDisplayHitmarker" })
+                    foreach (var methodName in FeedbackMethodNames)
                     {
-                        var method = target.GetType().GetMethod(methodName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                        var method = GetCachedMethod(target.GetType(), methodName);
                         if (method == null)
                             continue;
 
@@ -459,11 +627,11 @@ namespace UltimateDamagePlugin
                 if (target == null)
                     continue;
 
-                foreach (var methodName in new[] { "RpcSpawnBloodDrip", "RpcAddBlood", "RpcShowDamageScreen", "RpcPlayScreenEffect", "RpcPlayHitmarker", "RpcDisplayHitmarker" })
+                foreach (var methodName in VisualMethodNames)
                 {
                     try
                     {
-                        var method = target.GetType().GetMethod(methodName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic);
+                        var method = GetCachedMethod(target.GetType(), methodName);
                         if (method == null)
                             continue;
 
@@ -499,7 +667,7 @@ namespace UltimateDamagePlugin
                 if (random.NextDouble() > chance)
                     return;
 
-                var method = player.GetType().GetMethod("Ragdoll", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                var method = GetCachedRagdollMethod(player.GetType());
                 if (method != null)
                 {
                     method.Invoke(player, null);
@@ -529,6 +697,8 @@ namespace UltimateDamagePlugin
             var key = GetPlayerKey(player);
             if (!string.IsNullOrEmpty(key))
             {
+                CancelBleedForPlayer(key);
+                CancelRecoveryForPlayer(key);
                 activeBleeds.TryRemove(key, out _);
                 if (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode)
                     Log.Info($"[GunshotBleeding] RemoveBleedEffect: removed bleed for {player.Nickname}");

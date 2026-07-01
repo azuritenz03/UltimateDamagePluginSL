@@ -24,11 +24,16 @@ namespace UltimateDamagePlugin
             if (isDisposed)
                 return;
 
-            if (victim == null || damage <= 0f)
+            if (victim == null || damage <= 0f || !victim.IsAlive || victim.Health <= 0f)
                 return;
 
             var cfg = Plugin.Instance.Config;
             var key = GetPlayerKey(victim);
+            if (!string.IsNullOrEmpty(key) && skipNextHurting.ContainsKey(key))
+            {
+                skipNextHurting.TryRemove(key, out _);
+                return;
+            }
 
             try
             {

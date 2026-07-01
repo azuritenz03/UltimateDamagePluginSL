@@ -31,8 +31,16 @@
       <HintPath>libs/Mirror.dll</HintPath>
     </Reference>
 
+    <Reference Include="CommandSystem.Core">
+      <HintPath>libs/CommandSystem.Core.dll</HintPath>
+    </Reference>
+
     <Reference Include="UnityEngine.CoreModule">
       <HintPath>libs/UnityEngine.CoreModule.dll</HintPath>
+    </Reference>
+
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>libs/UnityEngine.PhysicsModule.dll</HintPath>
     </Reference>
   </ItemGroup>
 
