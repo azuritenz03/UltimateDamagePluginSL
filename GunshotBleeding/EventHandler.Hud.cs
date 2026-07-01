@@ -32,9 +32,11 @@ namespace UltimateDamagePlugin
 
             if (activeBleeds.TryGetValue(key, out var bleed))
             {
-                var severity = bleed.DamagePerSecond >= 3f ? "Heavy" : bleed.DamagePerSecond >= 1.5f ? "Moderate" : "Light";
+                var severity = string.Equals(bleed.Severity, "critical", StringComparison.OrdinalIgnoreCase) ? "Critical"
+                    : string.Equals(bleed.Severity, "moderate", StringComparison.OrdinalIgnoreCase) ? "Moderate"
+                    : "Light";
                 var remainingSec = Math.Ceiling(bleed.RemainingTicks * bleed.TickIntervalSeconds);
-                sb.Append($"Bleed: {severity} ({bleed.DamagePerSecond} dmg/s) {remainingSec}s");
+                sb.Append($"Bleed: {severity} {remainingSec}s");
             }
 
             var text = sb.ToString().Trim();

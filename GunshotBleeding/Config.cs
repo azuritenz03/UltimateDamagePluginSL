@@ -9,8 +9,8 @@ namespace UltimateDamagePlugin
         // 🔴 REQUIRED by EXILED (this fixes your error)
         public bool Debug { get; set; } = false;
 
-        public float ChestShotDamage { get; set; } = 50f;
-        public float LimbShotDamage { get; set; } = 25f;
+        public float ChestShotDamage { get; set; } = 45f;
+        public float LimbShotDamage { get; set; } = 20f;
 
         public float ArmorDamageReduction { get; set; } = 0.2f;
         public float ArmorDurability { get; set; } = 100f;
@@ -28,10 +28,12 @@ namespace UltimateDamagePlugin
         public int MediumBleedDuration { get; set; } = 10;
         public int HeavyBleedDuration { get; set; } = 20;
 
-        public float BleedDamagePerSecond { get; set; } = 2f;
+        public float LightBleedDamagePerSecond { get; set; } = 1.5f;
+        public float ModerateBleedDamagePerSecond { get; set; } = 3.0f;
+        public float CriticalBleedDamagePerSecond { get; set; } = 5.0f;
         public float BleedTickIntervalSeconds { get; set; } = 1f;
         public bool BleedFeedbackEnabled { get; set; } = true;
-        public float HumanDamageMultiplier { get; set; } = 1.25f;
+        public float HumanDamageMultiplier { get; set; } = 1f;
 
         public bool EnableInjuryDebuffs { get; set; } = true;
         public float SevereBleedMovementPenalty { get; set; } = 0.25f;

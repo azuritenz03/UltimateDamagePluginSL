@@ -19,7 +19,7 @@ namespace UltimateDamagePlugin
             return player.Id.ToString();
         }
 
-        private void ProcessDamage(Player victim, float damage, string damageType, string caliber, Player attacker, string bodyPart, int bleedDuration, float bleedDamagePerSecond, float bleedTickIntervalSeconds, string sourceName, bool applyHurt = true, bool applyArmor = true)
+        private void ProcessDamage(Player victim, float damage, string damageType, string caliber, Player attacker, string bodyPart, int bleedDuration, float bleedTickIntervalSeconds, string sourceName, string bleedSeverity = null, bool applyHurt = true, bool applyArmor = true)
         {
             if (isDisposed)
                 return;
@@ -62,7 +62,15 @@ namespace UltimateDamagePlugin
 
                 try
                 {
-                    if (!isBleedSource && (attacker == null || !attacker.IsHuman) && damage >= victim.Health)
+                    var isGunshot = string.Equals(sourceName, "gunshot", StringComparison.OrdinalIgnoreCase) && attacker != null && attacker.IsHuman;
+                    if (isGunshot && damage >= victim.Health)
+                    {
+                        var capped = Math.Max(0.1f, victim.Health * 0.25f);
+                        if (cfg.Debug || cfg.DebugMode)
+                            Log.Info($"[GunshotBleeding] Capping lethal gunshot damage {damage} -> {capped} for {victim.Nickname}");
+                        damage = capped;
+                    }
+                    else if (!isBleedSource && (attacker == null || !attacker.IsHuman) && damage >= victim.Health)
                     {
                         var capped = Math.Max(1f, victim.Health - 1f);
                         if (cfg.Debug || cfg.DebugMode)
@@ -129,14 +137,19 @@ namespace UltimateDamagePlugin
                         Log.Warn($"[GunshotBleeding] Hurt call reflection failed for {victim.Nickname}: {ex.Message}");
                 }
 
+                if (!victim.IsAlive || victim.Health <= 0f)
+                    return;
+
                 if (bleedDuration > 0)
                 {
-                    if (cfg.UseBuiltInBleedingEffect)
-                        victim.EnableEffect(EffectType.Bleeding, bleedDuration);
-
-                    ApplyBleedEffect(victim, bleedDuration, bleedDamagePerSecond, bleedTickIntervalSeconds, bodyPart);
-                    ApplyInjuryState(victim, new BleedProfile { Duration = bleedDuration, DamagePerSecond = bleedDamagePerSecond, TickIntervalSeconds = bleedTickIntervalSeconds, Severity = bleedDuration >= cfg.HeavyBleedDuration ? "severe" : bleedDuration >= cfg.MediumBleedDuration ? "moderate" : "light", SourceName = sourceName });
+                    var severity = bleedSeverity ?? (bleedDuration >= cfg.HeavyBleedDuration ? "critical" : bleedDuration >= cfg.MediumBleedDuration ? "moderate" : "light");
+                    ApplyBleedEffect(victim, bleedDuration, bleedTickIntervalSeconds, bodyPart, severity);
+                    ApplyInjuryState(victim, new BleedProfile { Duration = bleedDuration, TickIntervalSeconds = bleedTickIntervalSeconds, Severity = severity, SourceName = sourceName });
                     PlayBleedFeedback(victim, sourceName);
+                    if (string.Equals(bodyPart, "Body", StringComparison.OrdinalIgnoreCase) && string.Equals(severity, "critical", StringComparison.OrdinalIgnoreCase))
+                    {
+                        TryApplyCollapse(victim, 0.25f);
+                    }
                 }
 
                 UpdatePlayerHud(victim);

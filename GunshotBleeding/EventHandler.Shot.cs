@@ -44,7 +44,6 @@ namespace UltimateDamagePlugin
                     return;
                 }
 
-                damage *= cfg.HumanDamageMultiplier;
                 damage *= distanceFactor;
                 damage = Math.Max(1f, damage);
 
@@ -69,7 +68,7 @@ namespace UltimateDamagePlugin
                 var bleedProfile = CreateBleedProfile(damage, hitboxType, cfg);
                 ev.CanHurt = false;
                 skipNextHurting.TryAdd(key, 0);
-                ProcessDamage(victim, damage, "Bullet wound", cfg.DefaultCaliber, ev.Player, hitboxType.ToString(), bleedProfile.Duration, bleedProfile.DamagePerSecond, bleedProfile.TickIntervalSeconds, "gunshot", true, false);
+                ProcessDamage(victim, damage, "Bullet wound", cfg.DefaultCaliber, ev.Player, hitboxType.ToString(), bleedProfile.Duration, bleedProfile.TickIntervalSeconds, "gunshot", bleedProfile.Severity, true, false);
 
                 if (cfg.Debug || cfg.DebugMode)
                     Log.Info($"[GunshotBleeding] {ev.Player.Nickname} hit {victim.Nickname} in {hitboxType}, damage={damage}, bleed={bleedProfile.Duration}s, severity={bleedProfile.Severity}");

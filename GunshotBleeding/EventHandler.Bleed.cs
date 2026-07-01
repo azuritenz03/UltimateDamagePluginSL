@@ -3,9 +3,9 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Threading.Tasks;
 using Exiled.API.Enums;
 using Exiled.API.Features;
-using MEC;
 
 namespace UltimateDamagePlugin
 {
@@ -19,6 +19,7 @@ namespace UltimateDamagePlugin
             public float DamagePerSecond;
             public int RemainingTicks;
             public float TickIntervalSeconds;
+            public string Severity;
             public System.Collections.Generic.HashSet<string> AffectedParts = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
         }
 
@@ -39,9 +40,9 @@ namespace UltimateDamagePlugin
             public float AimPenalty;
         }
 
-        private void ApplyBleedEffect(Player player, int durationSeconds, float damagePerSecond, float tickIntervalSeconds, string bodyPart = null)
+        private void ApplyBleedEffect(Player player, int durationSeconds, float tickIntervalSeconds, string bodyPart, string severity)
         {
-            if (player == null || !player.IsAlive || durationSeconds <= 0 || damagePerSecond <= 0f)
+            if (player == null || !player.IsAlive || durationSeconds <= 0 || string.IsNullOrEmpty(severity))
                 return;
 
             var key = GetPlayerKey(player);
@@ -50,7 +51,15 @@ namespace UltimateDamagePlugin
 
             if (activeBleeds.TryGetValue(key, out var existing))
             {
-                existing.DamagePerSecond = Math.Max(existing.DamagePerSecond, damagePerSecond);
+                var existingRank = GetSeverityRank(existing.Severity);
+                var newRank = GetSeverityRank(severity);
+                var effectiveSeverity = existingRank >= newRank ? existing.Severity : severity;
+
+                if (existingRank == newRank && string.Equals(existing.Severity, "moderate", StringComparison.OrdinalIgnoreCase) && string.Equals(severity, "moderate", StringComparison.OrdinalIgnoreCase))
+                    effectiveSeverity = "critical";
+
+                existing.Severity = effectiveSeverity;
+                existing.DamagePerSecond = GetSeverityRate(effectiveSeverity);
                 existing.RemainingTicks = Math.Max(existing.RemainingTicks, GetTickCount(durationSeconds, tickIntervalSeconds));
                 existing.TickIntervalSeconds = Math.Min(existing.TickIntervalSeconds, tickIntervalSeconds);
                 if (!string.IsNullOrEmpty(bodyPart))
@@ -60,9 +69,10 @@ namespace UltimateDamagePlugin
 
             var state = new BleedTickState
             {
-                DamagePerSecond = damagePerSecond,
+                DamagePerSecond = GetSeverityRate(severity),
                 RemainingTicks = GetTickCount(durationSeconds, tickIntervalSeconds),
-                TickIntervalSeconds = tickIntervalSeconds
+                TickIntervalSeconds = tickIntervalSeconds,
+                Severity = severity
             };
 
             if (!string.IsNullOrEmpty(bodyPart))
@@ -72,7 +82,7 @@ namespace UltimateDamagePlugin
             StartBleedTick(player, key, state);
             UpdatePlayerHud(player);
             if (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode)
-                Log.Info($"[GunshotBleeding] Bleed started for {player.Nickname}: {damagePerSecond} DPS for {durationSeconds}s (part={bodyPart})");
+                Log.Info($"[GunshotBleeding] Bleed started for {player.Nickname}: severity={severity} for {durationSeconds}s (part={bodyPart})");
         }
 
         private void StartBleedTick(Player player, string key, BleedTickState state)
@@ -80,36 +90,20 @@ namespace UltimateDamagePlugin
             if (player == null || string.IsNullOrEmpty(key) || state == null)
                 return;
 
-            Timing.RunCoroutine(BleedTickCoroutine(player, key, state));
+            _ = RunBleedTickAsync(player, key, state);
         }
 
-        private System.Collections.Generic.IEnumerator<float> BleedTickCoroutine(Player player, string key, BleedTickState state)
+        private async Task RunBleedTickAsync(Player player, string key, BleedTickState state)
         {
             while (!isDisposed && activeBleeds.TryGetValue(key, out var currentState) && currentState.RemainingTicks > 0)
             {
-                yield return Timing.WaitForSeconds(Math.Max(0.25f, currentState.TickIntervalSeconds));
+                await Task.Delay(TimeSpan.FromSeconds(Math.Max(0.25f, currentState.TickIntervalSeconds))).ConfigureAwait(false);
 
                 if (player == null || !player.IsConnected || !player.IsAlive || player.Health <= 0f)
                     break;
 
                 if (currentState.RemainingTicks <= 0)
                     break;
-
-                var perTickDamage = Math.Max(1f, currentState.DamagePerSecond * currentState.TickIntervalSeconds);
-
-                try
-                {
-                    var victim = player;
-                    if (victim != null && victim.IsConnected && victim.IsAlive && victim.Health > 0f)
-                    {
-                        skipNextHurting.TryAdd(key, 0);
-                        ProcessDamage(victim, perTickDamage, "Bleeding", Plugin.Instance.Config.DefaultCaliber, null, "BleedTick", 0, 0f, currentState.TickIntervalSeconds, "bleed", true, false);
-                    }
-                }
-                catch
-                {
-                    // Ignore failures applying tick damage.
-                }
 
                 try
                 {
@@ -122,7 +116,21 @@ namespace UltimateDamagePlugin
 
                 try
                 {
-                    TriggerBleedVisuals(player, currentState.DamagePerSecond);
+                    var perTickDamage = currentState.DamagePerSecond * currentState.TickIntervalSeconds;
+                    if (player != null && player.IsAlive && perTickDamage > 0f)
+                    {
+                        skipNextHurting.TryAdd(key, 0);
+                        ProcessDamage(player, perTickDamage, "Bleeding", Plugin.Instance.Config.DefaultCaliber, null, "BleedTick", 0, currentState.TickIntervalSeconds, "bleed", "bleed", true, false);
+                    }
+                }
+                catch
+                {
+                    // Ignore failures applying tick damage.
+                }
+
+                try
+                {
+                    TriggerBleedVisuals(player, currentState.Severity);
                 }
                 catch
                 {
@@ -144,17 +152,17 @@ namespace UltimateDamagePlugin
 
         private void StartRecoveryLoop(Player player, string key)
         {
-            if (player == null || string.IsNullOrEmpty(key))
+            if (player == null || string.IsNullOrEmpty(key) || !player.IsAlive)
                 return;
 
-            Timing.RunCoroutine(BleedRecoveryCoroutine(player, key));
+            _ = RunRecoveryLoopAsync(player, key);
         }
 
-        private System.Collections.Generic.IEnumerator<float> BleedRecoveryCoroutine(Player player, string key)
+        private async Task RunRecoveryLoopAsync(Player player, string key)
         {
             while (!isDisposed && player != null && player.IsConnected && player.IsAlive && player.Health > 0f)
             {
-                yield return Timing.WaitForSeconds(Math.Max(1f, Plugin.Instance.Config.RecoveryTickSeconds));
+                await Task.Delay(TimeSpan.FromSeconds(Math.Max(1f, Plugin.Instance.Config.RecoveryTickSeconds))).ConfigureAwait(false);
 
                 if (player == null || !player.IsConnected || !player.IsAlive || player.Health <= 0f)
                     break;
@@ -227,9 +235,9 @@ namespace UltimateDamagePlugin
             var state = new InjuryState
             {
                 Severity = severity,
-                RemainingSeverity = severity == "severe" ? 10f : severity == "moderate" ? 6f : 3f,
-                MovementPenalty = severity == "severe" ? Plugin.Instance.Config.SevereBleedMovementPenalty : severity == "moderate" ? 0.15f : 0.08f,
-                AimPenalty = severity == "severe" ? Plugin.Instance.Config.SevereBleedAimPenalty : severity == "moderate" ? 0.12f : 0.05f
+                RemainingSeverity = severity == "critical" ? 10f : severity == "heavy" ? 6f : 3f,
+                MovementPenalty = severity == "critical" ? Plugin.Instance.Config.SevereBleedMovementPenalty : severity == "moderate" ? 0.15f : 0.08f,
+                AimPenalty = severity == "critical" ? Plugin.Instance.Config.SevereBleedAimPenalty : severity == "moderate" ? 0.12f : 0.05f
             };
 
             injuryStates[GetPlayerKey(player)] = state;
@@ -265,7 +273,7 @@ namespace UltimateDamagePlugin
 
             try
             {
-                if (string.Equals(state.Severity, "severe", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(state.Severity, "critical", StringComparison.OrdinalIgnoreCase))
                     player.EnableEffect(EffectType.Hemorrhage, effectDuration);
             }
             catch
@@ -320,25 +328,56 @@ namespace UltimateDamagePlugin
 
         private BleedProfile CreateBleedProfile(float amount, HitboxType hitboxType, Config cfg)
         {
-            var duration = 0;
-            if (amount >= cfg.HeavyDamageThreshold)
-                duration = cfg.HeavyBleedDuration;
-            else if (amount >= cfg.MediumDamageThreshold)
-                duration = cfg.MediumBleedDuration;
-            else if (amount >= cfg.LightDamageThreshold)
-                duration = cfg.LightBleedDuration;
+            if (hitboxType == HitboxType.Limb)
+            {
+                return new BleedProfile
+                {
+                    Duration = cfg.LightBleedDuration,
+                    DamagePerSecond = cfg.LightBleedDamagePerSecond,
+                    TickIntervalSeconds = Math.Max(cfg.BleedTickIntervalSeconds, 1f),
+                    SourceName = "gunshot",
+                    Severity = "light"
+                };
+            }
 
-            if (duration > 0 && hitboxType == HitboxType.Body && duration == cfg.LightBleedDuration)
-                duration = cfg.MediumBleedDuration;
+            if (hitboxType == HitboxType.Body)
+            {
+                return new BleedProfile
+                {
+                    Duration = cfg.MediumBleedDuration,
+                    DamagePerSecond = cfg.ModerateBleedDamagePerSecond,
+                    TickIntervalSeconds = Math.Max(cfg.BleedTickIntervalSeconds, 1f),
+                    SourceName = "gunshot",
+                    Severity = "moderate"
+                };
+            }
 
             return new BleedProfile
             {
-                Duration = duration,
-                DamagePerSecond = Math.Max(cfg.BleedDamagePerSecond, 1.5f),
+                Duration = 0,
+                DamagePerSecond = 0f,
                 TickIntervalSeconds = Math.Max(cfg.BleedTickIntervalSeconds, 1f),
                 SourceName = "gunshot",
-                Severity = duration >= cfg.HeavyBleedDuration ? "severe" : duration >= cfg.MediumBleedDuration ? "moderate" : "light"
+                Severity = "light"
             };
+        }
+
+        private float GetSeverityRate(string severity)
+        {
+            if (string.Equals(severity, "critical", StringComparison.OrdinalIgnoreCase))
+                return Plugin.Instance.Config.CriticalBleedDamagePerSecond;
+            if (string.Equals(severity, "moderate", StringComparison.OrdinalIgnoreCase))
+                return Plugin.Instance.Config.ModerateBleedDamagePerSecond;
+            return Plugin.Instance.Config.LightBleedDamagePerSecond;
+        }
+
+        private int GetSeverityRank(string severity)
+        {
+            if (string.Equals(severity, "critical", StringComparison.OrdinalIgnoreCase))
+                return 3;
+            if (string.Equals(severity, "moderate", StringComparison.OrdinalIgnoreCase))
+                return 2;
+            return 1;
         }
 
         private void PlayBleedFeedback(Player player, string sourceName)
@@ -402,7 +441,7 @@ namespace UltimateDamagePlugin
             return Math.Max(1, (int)Math.Ceiling(durationSeconds / tickIntervalSeconds));
         }
 
-        private void TriggerBleedVisuals(Player player, float severity)
+        private void TriggerBleedVisuals(Player player, string severity)
         {
             if (player == null || !Plugin.Instance.Config.BleedFeedbackEnabled)
                 return;
@@ -411,7 +450,9 @@ namespace UltimateDamagePlugin
             if (hub == null)
                 return;
 
-            var paramSeverity = severity <= 0f ? 1 : (int)Math.Ceiling(severity);
+            var paramSeverity = string.Equals(severity, "critical", StringComparison.OrdinalIgnoreCase) ? 3
+                : string.Equals(severity, "heavy", StringComparison.OrdinalIgnoreCase) ? 2
+                : 1;
             var targetObjects = new object[] { player, hub };
             foreach (var target in targetObjects)
             {
@@ -437,7 +478,7 @@ namespace UltimateDamagePlugin
                         }
                         else if (parameters.Length == 1 && parameters[0].ParameterType == typeof(string))
                         {
-                            method.Invoke(target, new object[] { severity.ToString() });
+                            method.Invoke(target, new object[] { severity });
                         }
                     }
                     catch
@@ -445,6 +486,38 @@ namespace UltimateDamagePlugin
                         // Ignore any reflection/rpc invocation errors for visuals.
                     }
                 }
+            }
+        }
+
+        private void TryApplyCollapse(Player player, float chance)
+        {
+            if (player == null || !player.IsAlive || chance <= 0f)
+                return;
+
+            try
+            {
+                if (random.NextDouble() > chance)
+                    return;
+
+                var method = player.GetType().GetMethod("Ragdoll", BindingFlags.Public | BindingFlags.Instance | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+                if (method != null)
+                {
+                    method.Invoke(player, null);
+                    return;
+                }
+            }
+            catch
+            {
+                // Ignore missing collapse support and just continue.
+            }
+
+            try
+            {
+                player.EnableEffect(EffectType.Hemorrhage, 3);
+            }
+            catch
+            {
+                // Ignore effect application issues.
             }
         }
 
