@@ -1,10 +1,11 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Threading.Tasks;
 using Exiled.API.Enums;
 using Exiled.API.Features;
+using MEC;
 
 namespace UltimateDamagePlugin
 {
@@ -76,99 +77,102 @@ namespace UltimateDamagePlugin
 
         private void StartBleedTick(Player player, string key, BleedTickState state)
         {
-            _ = Task.Run(async () =>
+            if (player == null || string.IsNullOrEmpty(key) || state == null)
+                return;
+
+            Timing.RunCoroutine(BleedTickCoroutine(player, key, state));
+        }
+
+        private System.Collections.Generic.IEnumerator<float> BleedTickCoroutine(Player player, string key, BleedTickState state)
+        {
+            while (!isDisposed && activeBleeds.TryGetValue(key, out var currentState) && currentState.RemainingTicks > 0)
             {
+                yield return Timing.WaitForSeconds(Math.Max(0.25f, currentState.TickIntervalSeconds));
+
+                if (player == null || !player.IsConnected || !player.IsAlive || player.Health <= 0f)
+                    break;
+
+                if (currentState.RemainingTicks <= 0)
+                    break;
+
+                var perTickDamage = Math.Max(1f, currentState.DamagePerSecond * currentState.TickIntervalSeconds);
+
                 try
                 {
-                    while (!isDisposed && activeBleeds.TryGetValue(key, out var currentState) && currentState.RemainingTicks > 0)
+                    var victim = player;
+                    if (victim != null && victim.IsConnected && victim.IsAlive && victim.Health > 0f)
                     {
-                        await Task.Delay(TimeSpan.FromSeconds(Math.Max(0.25f, currentState.TickIntervalSeconds)));
-
-                        if (player == null || !player.IsConnected || !player.IsAlive || player.Health <= 0f)
-                            break;
-
-                        if (currentState.RemainingTicks <= 0)
-                            break;
-
-                        var perTickDamage = Math.Max(1f, currentState.DamagePerSecond * currentState.TickIntervalSeconds);
-
-                        try
-                        {
-                            var victim = player;
-                            if (victim != null && victim.IsConnected && victim.IsAlive && victim.Health > 0f)
-                            {
-                                skipNextHurting.TryAdd(key, 0);
-                                ProcessDamage(victim, perTickDamage, "Bleeding", Plugin.Instance.Config.DefaultCaliber, null, "BleedTick", 0, 0f, currentState.TickIntervalSeconds, "bleed", true, false);
-                            }
-                        }
-                        catch
-                        {
-                            // Ignore failures applying tick damage.
-                        }
-
-                        try
-                        {
-                            PlayBleedFeedback(player, "bleed");
-                        }
-                        catch
-                        {
-                            // Ignore feedback errors.
-                        }
-
-                        try
-                        {
-                            TriggerBleedVisuals(player, currentState.DamagePerSecond);
-                        }
-                        catch
-                        {
-                            // Ignore visual RPC failures.
-                        }
-
-                        currentState.RemainingTicks--;
-                        UpdatePlayerHud(player);
+                        skipNextHurting.TryAdd(key, 0);
+                        ProcessDamage(victim, perTickDamage, "Bleeding", Plugin.Instance.Config.DefaultCaliber, null, "BleedTick", 0, 0f, currentState.TickIntervalSeconds, "bleed", true, false);
                     }
                 }
                 catch
                 {
-                    // Swallow exceptions from the bleed task to avoid crashing the server.
+                    // Ignore failures applying tick damage.
                 }
 
-                if (activeBleeds.ContainsKey(key))
+                try
                 {
-                    activeBleeds.TryRemove(key, out _);
-                    if (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode)
-                        Log.Info($"[GunshotBleeding] Bleed ended for {player?.Nickname}");
-                    StartRecoveryLoop(player, key);
+                    PlayBleedFeedback(player, "bleed");
                 }
-            });
+                catch
+                {
+                    // Ignore feedback errors.
+                }
+
+                try
+                {
+                    TriggerBleedVisuals(player, currentState.DamagePerSecond);
+                }
+                catch
+                {
+                    // Ignore visual RPC failures.
+                }
+
+                currentState.RemainingTicks--;
+                UpdatePlayerHud(player);
+            }
+
+            if (activeBleeds.ContainsKey(key))
+            {
+                activeBleeds.TryRemove(key, out _);
+                if (Plugin.Instance.Config.Debug || Plugin.Instance.Config.DebugMode)
+                    Log.Info($"[GunshotBleeding] Bleed ended for {player?.Nickname}");
+                StartRecoveryLoop(player, key);
+            }
         }
 
         private void StartRecoveryLoop(Player player, string key)
         {
-            _ = Task.Run(async () =>
+            if (player == null || string.IsNullOrEmpty(key))
+                return;
+
+            Timing.RunCoroutine(BleedRecoveryCoroutine(player, key));
+        }
+
+        private System.Collections.Generic.IEnumerator<float> BleedRecoveryCoroutine(Player player, string key)
+        {
+            while (!isDisposed && player != null && player.IsConnected && player.IsAlive && player.Health > 0f)
             {
-                while (!isDisposed && player != null && player.IsConnected && player.IsAlive && player.Health > 0f)
+                yield return Timing.WaitForSeconds(Math.Max(1f, Plugin.Instance.Config.RecoveryTickSeconds));
+
+                if (player == null || !player.IsConnected || !player.IsAlive || player.Health <= 0f)
+                    break;
+
+                if (!injuryStates.TryGetValue(key, out var state))
+                    break;
+
+                state.RemainingSeverity = Math.Max(0f, state.RemainingSeverity - Plugin.Instance.Config.RecoveryAmountPerTick);
+                if (state.RemainingSeverity <= 0f)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(Math.Max(1f, Plugin.Instance.Config.RecoveryTickSeconds)));
-
-                    if (player == null || !player.IsConnected || !player.IsAlive || player.Health <= 0f)
-                        break;
-
-                    if (!injuryStates.TryGetValue(key, out var state))
-                        break;
-
-                    state.RemainingSeverity = Math.Max(0f, state.RemainingSeverity - Plugin.Instance.Config.RecoveryAmountPerTick);
-                    if (state.RemainingSeverity <= 0f)
-                    {
-                        injuryStates.TryRemove(key, out _);
-                        ResetInjuryDebuffs(player);
-                        UpdatePlayerHud(player);
-                        break;
-                    }
-
-                    ApplyInjuryDebuffs(player, state);
+                    injuryStates.TryRemove(key, out _);
+                    ResetInjuryDebuffs(player);
+                    UpdatePlayerHud(player);
+                    break;
                 }
-            });
+
+                ApplyInjuryDebuffs(player, state);
+            }
         }
 
         public void ClearBleedState()
